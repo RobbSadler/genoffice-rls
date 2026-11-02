@@ -191,6 +191,7 @@ export const fr = {
   appCtxSendToBack: 'Mettre à l’arrière-plan',
   appCtxBringForward: 'Avancer',
   appCtxSendBackward: 'Reculer',
+  appCtxRotate: 'Rotation',
   appCtxRotateLeft90: 'Faire pivoter de 90° à gauche',
   appCtxRotateRight90: 'Faire pivoter de 90° à droite',
   appCtxFlipH: 'Retourner horizontalement',
@@ -230,6 +231,8 @@ export const fr = {
   appMasterFillNone: 'Aucun remplissage',
   appMasterStroke: 'Couleur du contour…',
   appMasterStrokeNone: 'Aucun contour',
+  appMasterInsertTextBox: 'Zone de texte',
+  appMasterInsertShape: 'Formes',
   appStartOpening: 'Ouverture…',
   appReadingSlideTitle:
     'Cliquez pour passer à la diapositive suivante (Échap pour quitter le mode Lecture)',

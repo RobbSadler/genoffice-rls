@@ -51,6 +51,10 @@ import {
   type UniverRuntime,
   type UniverWorksheet,
 } from './univer-state'
+import {
+  hashSheetPassword,
+  type SheetPasswordHash,
+} from '@genoffice/xlsx-gateway/gateway/xlsx-protection-hash'
 import { applyChangePlan, planFromOps, type OpExecutorContext } from './op-executor'
 import { installSheetsMcpBridge, type McpSheetHandlers } from './mcp-bridge'
 import { renameChartRefsForSheet } from './workbook-ops'
@@ -141,6 +145,7 @@ import {
   AgentLoop,
   COMPLETED_VIA_TOOLS_TEXT,
   composeSkills,
+  withAttachedSkills,
   type AgentImage,
 } from '@genoffice/agent-core'
 import { imageGenerationAvailable, type AiSettings } from '@genoffice/ai-provider/browser'
@@ -161,11 +166,15 @@ import {
 } from '@genoffice/xlsx-gateway/domain/chart-visual'
 import { InMemoryWorkbookAdapter } from '@genoffice/xlsx-gateway/domain/in-memory-workbook'
 import { cfRuleUnsaveableReason, iconSetSaveable } from '@genoffice/xlsx-gateway/gateway/xlsx-cf'
+import type { SheetRedactionState } from '@genoffice/xlsx-gateway/gateway/xlsx-redaction'
+import { statesOnScreen } from './redact-marks-shift'
 import { installLazyFindBridge } from './lazy-find'
 import { startFullLoad } from './full-load'
 import { opensInFormulaMode, workbookCellCounts } from './load-budget'
 import { installReplaceAutoSearch } from './replace-autosearch'
 import { FindReplacePanel } from './FindReplacePanel'
+import { SpellingDialog } from './SpellingDialog'
+import { spellcheckEnabled, storeSpellcheckEnabled } from './spellcheck-pref'
 import {
   installCrossHighlight,
   loadCrossHighlightPreference,
@@ -274,6 +283,21 @@ import {
   readSheetFeatures as readSheetFeaturesImpl,
   type WorkbookReadContext,
 } from './ai/workbook-readers'
+import { NO_REDACTIONS, sanitizeLabel, type RedactionIndex } from './ai/redact'
+import { modelSaveAsName } from './file-naming'
+import { redactionSessionFor } from './ai/redact-load'
+import { RedactDialog } from './components/RedactDialog'
+import { installRedactMenu, type SelectionRequest } from './redact-menu'
+import { buildMark, restoreCellFill } from './redact-tint'
+import {
+  addMark,
+  clearMark,
+  hasPendingRedactionChange,
+  indexFor,
+  redactIntentFor,
+  type MarkKey,
+  type RedactDialogState,
+} from './redact-actions'
 import {
   getSourceRange as getSourceRangeImpl,
   handleCreatePivot as handleCreatePivotImpl,
@@ -327,6 +351,7 @@ import { installFormulaBarAutosize } from './formula-bar-autosize'
 import { createFunctionArgumentsHost, installFxButtonHook } from './function-arguments-runtime'
 import {
   applyShowFormulasView,
+  formulaViewSheets,
   installFormulaTextInterceptor,
   installFormulaViewInterceptor,
 } from './formula-view'
@@ -370,11 +395,13 @@ import { installForceStringMarkGate, installLongTextRender } from './long-text-r
 import { installAutofitWrapBudget } from './autofit-wrap-budget'
 import { installAutofitLinePitch } from './autofit-line-pitch'
 import { installHeaderUnhideDebounce } from './load-perf-patches'
+import { installCopyAnimationIdle } from './copy-animation-idle'
 import { installNumberAsTextAlertSeverity } from './number-as-text-alert'
 import { installFormulaStreamHold } from './formula-stream-hold'
 import { installRichTextBidiFix } from './rich-text-bidi-fix'
 import { installRtlTextDirectionFix } from './rtl-text-fix'
 import { installRtlGridMirror } from './rtl-grid-mirror'
+import { installVertAlignRender } from './vert-align-render'
 import { installMultiRowAutofit } from './autofit-multi-row'
 import { registerExcelJumpNav } from './excel-jump-nav'
 import { registerEditorWordJump } from './editor-word-jump'
@@ -399,7 +426,12 @@ import {
   type StatusBarFunc,
   type StatusBarStatsFilter,
 } from './status-bar-stats'
-import { applyUniverLocale, insertRowsBelowLocale, numberAsTextAlertLocale } from './univer-locales'
+import {
+  applyUniverLocale,
+  hideFromAiLocale,
+  insertRowsBelowLocale,
+  numberAsTextAlertLocale,
+} from './univer-locales'
 import { installRuleDetail } from './univer-rule-detail'
 import { installActiveCellDataValidationChrome } from './data-validation-dropdown'
 import { installInvalidDataMarkerSuppression } from './data-validation-marker'
@@ -407,6 +439,8 @@ import { installThreadedCommentAffordances, type ThreadHover } from './threaded-
 import { threadPane, threadStore } from './threaded-comments'
 import { ThreadHoverCard, ThreadedCommentsPane } from './ThreadedCommentsPane'
 import { NotePicturesPane } from './NotePicturesPane'
+import type { PendingNotePicture } from './note-pictures'
+import { handleRemoveNotePicture } from './note-picture-actions'
 import { installFormulaNullResultFix } from './formula-null-result'
 import { installNumberFormatFix } from './numfmt-fix'
 import { installIfsEmptySetFix } from './ifs-empty-set'
@@ -460,6 +494,7 @@ import {
   recordNoteChange,
   recordProtectedRangesChange,
   recordFilterChange,
+  recordRemoveNumfmt,
   recordSetNumfmt,
   recordSetRangeValues,
   recordSheetHidden,
@@ -479,6 +514,8 @@ import { lastSurvivingScreenLine, netAxisDelta, screenToFile } from './view-tran
 import { selectionFormatEquals, toSelectionFormat, type SelectionFormat } from './selection-format'
 import { ExcelShell, type SelectedShapeRibbon } from './ExcelShell'
 import { RecoveryDialog } from './RecoveryDialog'
+import { EncryptedWorkbookPasswordDialog } from './EncryptedWorkbookPasswordDialog'
+import { ChangeWorkbookPasswordDialog } from './ChangeWorkbookPasswordDialog'
 import { ToastHost } from './toast'
 import { showToast } from './toast-bus'
 import { AdvancedFilterDialog, type AdvancedFilterColumn } from './AdvancedFilterDialog'
@@ -498,6 +535,7 @@ import {
 } from './calc-options'
 import { applyFillSeries, fillSeriesContext } from './fill-series-apply'
 import { solveGoalSeek } from './goal-seek'
+import { applyDataTable } from './data-table'
 import {
   awaitFormulaValues,
   clearVerifiedFormulaValues,
@@ -566,6 +604,45 @@ export function App({
   const adapterRef = useRef(new InMemoryWorkbookAdapter(initialSnapshot))
   const univerRef = useRef<UniverRuntime | null>(null)
   const lazyWorkbookRef = useRef<LazyWorkbookState | null>(null)
+  /**
+   * The cells the reader withheld from the model, read once per open (see the
+   * `readWorkbookRedactions` call in openLazyWorkbook). A ref rather than
+   * state: the readers ask about it per cell and nothing renders from it, and
+   * the marks the user adds later replace it through the same ref.
+   */
+  const redactionIndexRef = useRef<RedactionIndex | null>(null)
+  /**
+   * The same marks, in the shape the save takes (keyed by sheet name, as the
+   * package part is). Held here so a save can carry them even when nothing
+   * else in the journal is dirty — a workbook whose only pending change is a
+   * newly withheld cell is still a workbook that must be saved.
+   */
+  const redactionStatesRef = useRef<readonly SheetRedactionState[]>([])
+  /**
+   * What the part held when this workbook was opened. A mark added or cleared
+   * since then is a pending change the edit journal never sees, and the save
+   * ticks below decide whether there is anything to write from that journal
+   * alone — so without this a workbook whose only edit is a withheld cell
+   * would never autosave, and closing the tab would drop the mark silently.
+   */
+  const loadedRedactionStatesRef = useRef<readonly SheetRedactionState[] | null>(null)
+  /**
+   * The pending "what does this stand for?" question, or null when no dialog
+   * is open. State, not a ref: the dialog renders from it.
+   */
+  const [redactDialog, setRedactDialog] = useState<RedactDialogState | null>(null)
+  /**
+   * True when the reader's marks differ from what the file was opened with.
+   *
+   * Compares the two shapes as text: the marks are a handful of rectangles, and
+   * a stable serialization is both simpler and stricter than a field-by-field
+   * walk — a mark that moved by one row is a change, and both sides serialize
+   * in the same order, so the comparison is exact.
+   */
+  function redactionsPendingSave(): boolean {
+    const loaded = loadedRedactionStatesRef.current
+    return loaded !== null && hasPendingRedactionChange(redactionStatesRef.current, loaded)
+  }
   /// Univer undo/redo stack occupancy (subscribed at mount): drives the QAT button gray states
   const [univerHist, setUniverHist] = useState({ canUndo: false, canRedo: false })
   /// Set once Univer boots; mounts the app's Excel-style Find & Replace panel.
@@ -593,6 +670,13 @@ export function App({
   /// Cross-highlight ("reading mode") of the active row/column, persisted in
   /// localStorage like the auto-save flag; off until the user opts in.
   const [crossHighlightVisible, setCrossHighlightVisible] = useState(loadCrossHighlightPreference)
+  /// Spelling preference (Review ▸ Proofing / F7), docs' spellcheck-pref shape:
+  /// localStorage-backed, default on. Session Ignore-All words ride along and
+  /// live for the app session — docs scopes them to the open document, sheets
+  /// keeps one renderer session, the white-list is harmless across files.
+  const [spellcheckOn, setSpellcheckOn] = useState(spellcheckEnabled)
+  const [spellDialogOpen, setSpellDialogOpen] = useState(false)
+  const spellSessionIgnoredRef = useRef<Set<string>>(new Set())
   const crossHighlightRef = useRef<CrossHighlightHandle | null>(null)
   const outlineGutterRef = useRef<OutlineGutterHandle | null>(null)
   const visualInstallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -609,6 +693,7 @@ export function App({
   /// Whether any cell in the workbook has content — the ribbon's one-click AI
   /// action buttons are greyed out on a fully empty sheet.
   const [sheetHasContent, setSheetHasContent] = useState(false)
+  const [activeSheetId, setActiveSheetId] = useState<string | null>(null)
   const recomputeSheetContent = useCallback(() => {
     setSheetHasContent(() => {
       // A file opened from disk always counts as having content.
@@ -661,6 +746,7 @@ export function App({
           saveInFlight: saveGateRef.current.busy,
           hasWorkbook: true,
           journalEmpty: journalSize(state.editJournal) === 0,
+          redactionsPendingSave: redactionsPendingSave(),
           editingCell: editingCellRef.current,
           needsSaveAsNotUnsavedNew: Boolean(state.file.needsSaveAs) && !state.file.unsavedNew,
           isCsv: state.file.csvPath !== undefined,
@@ -696,6 +782,7 @@ export function App({
           saveInFlight: saveGateRef.current.busy,
           hasWorkbook: true,
           journalEmpty: journalSize(state.editJournal) === 0,
+          redactionsPendingSave: redactionsPendingSave(),
           editingCell: editingCellRef.current,
           needsSaveAsNotUnsavedNew: Boolean(state.file.needsSaveAs) && !state.file.unsavedNew,
           isCsv: state.file.csvPath !== undefined,
@@ -720,6 +807,18 @@ export function App({
   /// cancelled, so instead of a silent no-op the user gets an explicit offer
   /// to fully load the workbook first.
   const [fullLoadPrompt, setFullLoadPrompt] = useState<'ask' | 'tooLarge' | null>(null)
+  const [encryptedPasswordPrompt, setEncryptedPasswordPrompt] = useState<{
+    readonly error: string | null
+    readonly resolve: (password: string | null) => void
+  } | null>(null)
+  const requestEncryptedWorkbookPassword = (error: string | null): Promise<string | null> =>
+    new Promise((resolve) => setEncryptedPasswordPrompt({ error, resolve }))
+  const answerEncryptedWorkbookPassword = (password: string | null): void => {
+    const prompt = encryptedPasswordPrompt
+    setEncryptedPasswordPrompt(null)
+    prompt?.resolve(password)
+  }
+  const [changeWorkbookPasswordOpen, setChangeWorkbookPasswordOpen] = useState(false)
   const [message, setMessage] = useState(t('appReadyInitial'))
   const sheetTabActions = useMemo(
     () => createSheetTabActions({ univerRef, lazyWorkbookRef, notify: setMessage }),
@@ -1016,6 +1115,9 @@ export function App({
       openLazyWorkbook,
       setPendingEdits,
       readCells: (addresses, sheetId) => readCellsImpl(readContext(), addresses, sheetId),
+      // null until the part was read: a save in that window must not clear it
+      redactionStates: () =>
+        loadedRedactionStatesRef.current === null ? null : redactionStatesRef.current,
       stashViewRestore: (view) => {
         viewRestoreRef.current = view
       },
@@ -1108,6 +1210,13 @@ export function App({
   const [attachNotice, setAttachNotice] = useState<string | null>(null)
   const attachmentsRef = useRef(attachments)
   attachmentsRef.current = attachments
+  const [attachedSkills, setAttachedSkills] = useState<readonly string[]>([])
+  const attachedSkillsRef = useRef(attachedSkills)
+  attachedSkillsRef.current = attachedSkills
+  const toggleSkill = (name: string) =>
+    setAttachedSkills((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+    )
   /** Attachments consumed by earlier sends this session: sending clears the composer, but the
       files skill must keep reading them mid-run and in follow-up turns. Deduped by path. */
   const sentAttachmentsRef = useRef<readonly AttachmentMeta[]>([])
@@ -1609,7 +1718,29 @@ export function App({
     return images
   }
 
-  function runAgent(instruction: string, sentAttachments: readonly AttachmentMeta[]): void {
+  /** the attached skills' full text in front of the request; a skill that vanished is skipped */
+  const withSkillBodies = async (instruction: string, names: readonly string[]) => {
+    if (names.length === 0) return instruction
+    const bodies = await Promise.all(
+      names.map(async (name) => {
+        try {
+          return { name, body: await window.desktopApi.skillText(name) }
+        } catch {
+          return null
+        }
+      }),
+    )
+    return withAttachedSkills(
+      instruction,
+      bodies.filter((b): b is { name: string; body: string } => b !== null),
+    )
+  }
+
+  function runAgent(
+    instruction: string,
+    sentAttachments: readonly AttachmentMeta[],
+    sentSkills: readonly string[] = [],
+  ): void {
     const loop = agentLoopRef.current
     if (!instruction.trim() || !loop || loop.busy || runStartingRef.current) return
     runStartingRef.current = true
@@ -1624,13 +1755,18 @@ export function App({
     setMessage(t('appAiThinking'))
     appendChat({ role: 'assistant', text: '', tools: [], streaming: true })
     void collectImageAttachments(sentAttachments)
-      .then((images) => {
+      .then(async (images) => {
+        const modelInstruction = await withSkillBodies(instruction, sentSkills)
         runStartingRef.current = false
-        loop.run(instruction, images)
+        loop.run(modelInstruction, images)
       })
-      .catch(() => {
+      .catch(async () => {
+        // an unreadable image must not strand the run, nor drop the skills the user attached
+        const modelInstruction = await withSkillBodies(instruction, sentSkills).catch(
+          () => instruction,
+        )
         runStartingRef.current = false
-        loop.run(instruction)
+        loop.run(modelInstruction)
       })
   }
 
@@ -1688,6 +1824,7 @@ export function App({
     // file context (availableAttachments merges sent + live) — same as docs
     // (#224) and slides. The typed draft itself is kept.
     setAttachments([])
+    setAttachedSkills([])
     setAttachNotice(null)
     sentAttachmentsRef.current = []
     setPreview(null)
@@ -1699,11 +1836,207 @@ export function App({
    * preview-then-apply path handlePlan/handleLazyPlan already exercise. */
   /** App-scope refs bundle for the extracted workbook readers (ai/workbook-readers.ts). */
   function readContext(): WorkbookReadContext {
-    return { univerRef, lazyWorkbookRef, adapterRef }
+    return { univerRef, lazyWorkbookRef, adapterRef, redactionIndexRef }
+  }
+
+  /**
+   * The index the grid, the tint and the model all read.
+   *
+   * `redactionStatesRef` holds the marks in file coordinates — where the
+   * reader put them, and where a save writes them. The grid is somewhere else
+   * after this session's row and column edits, so the index is derived by
+   * replaying the journal's structural ops rather than by moving the marks and
+   * trying to move them back on undo. The journal is already how a streamed
+   * viewport survives the same shift, and it cancels an insert/remove pair on
+   * undo, so a mark follows the grid for free and returns with ⌘Z.
+   */
+  function rebuildRedactionIndex(): void {
+    const journal = lazyWorkbookRef.current?.editJournal
+    if (!journal) return
+    const sheets = getActiveSheetInfo().sheets
+    const idByName = new Map(sheets.map((sheet) => [sheet.name, sheet.id]))
+    const onScreen = statesOnScreen(redactionStatesRef.current, (name) => {
+      const id = idByName.get(name)
+      return id === undefined ? [] : (journal.structuralOps.get(id) ?? [])
+    })
+    redactionIndexRef.current = indexFor(onScreen, sheets)
   }
 
   function getActiveSheetInfo(): ActiveSheetInfo {
     return getActiveSheetInfoImpl(readContext(), aiRunScopeRef.current)
+  }
+
+  /**
+   * Re-derive the index whenever the grid's structure changes.
+   *
+   * A row inserted above a mark leaves it covering whatever shifted down into
+   * its place, and the app looks right the whole time — the tint is drawn from
+   * the mark — so the leak only appears in the saved file, on the next open, on
+   * someone else's machine. The AI's own inserts are refused while a mark would
+   * move (`ai/redact-guard.ts`); a person inserting a row from the grid is the
+   * case no guard sees.
+   */
+  const watchStructuralEditsForMarks = (): void => {
+    const api = univerRef.current?.univerAPI
+    if (!api) return
+    api.onCommandExecuted((command: { id?: string }) => {
+      if (!command?.id || !STRUCTURAL_EDIT_COMMAND_PATTERN.test(command.id)) return
+      rebuildRedactionIndex()
+    })
+  }
+
+  /** Turn a grid right-click into either a dialog or an immediate clear. */
+  function onRedactSelection(request: SelectionRequest) {
+    const state = lazyWorkbookRef.current
+    if (!state) return
+    const workbook = univerRef.current?.univerAPI.getActiveWorkbook()
+    const sheetName = workbook?.getSheetBySheetId(request.sheetId)?.getSheetName()
+    const intent = redactIntentFor(request, redactionIndexRef.current ?? NO_REDACTIONS, (id) =>
+      workbook?.getSheetBySheetId(id)?.getSheetName(),
+    )
+    if (intent.kind === 'ignore') return
+    if (intent.kind === 'clear') {
+      // The tint was clicked on the grid, so what arrives is in screen
+      // coordinates; the store keeps file coordinates. Same translation the
+      // create path makes, so the two actually meet.
+      const clearOps = lazyWorkbookRef.current?.editJournal.structuralOps.get(request.sheetId) ?? []
+      const clearRow = screenToFile(clearOps, 'row', intent.mark.startRow)
+      const clearEndRow = screenToFile(clearOps, 'row', intent.mark.endRow)
+      const clearCol = screenToFile(clearOps, 'column', intent.mark.startColumn)
+      const clearEndCol = screenToFile(clearOps, 'column', intent.mark.endColumn)
+      // The same gesture that withheld it stops withholding it — one item, and
+      // no second string in a locale set that must not grow.
+      const marked =
+        clearRow === null || clearEndRow === null || clearCol === null || clearEndCol === null
+          ? undefined
+          : redactionStatesRef.current
+              .find((entry) => entry.sheetName === intent.sheetName)
+              ?.marks.find(
+                (mark) =>
+                  mark.startRow === clearRow &&
+                  mark.endRow === clearEndRow &&
+                  mark.startColumn === clearCol &&
+                  mark.endColumn === clearEndCol,
+              )
+      const next =
+        clearRow === null || clearEndRow === null || clearCol === null || clearEndCol === null
+          ? redactionStatesRef.current
+          : clearMark(redactionStatesRef.current, intent.sheetName, {
+              ...intent.mark,
+              startRow: clearRow,
+              endRow: clearEndRow,
+              startColumn: clearCol,
+              endColumn: clearEndCol,
+            })
+      redactionStatesRef.current = next
+      rebuildRedactionIndex()
+      // The tint is the only thing the mark ever did to the reader's own
+      // formatting, so clearing has to take it back off.
+      if (marked && workbook) {
+        try {
+          restoreCellFill(
+            univerRef.current!,
+            request.sheetId,
+            workbook.getSheetBySheetId(request.sheetId)!.getRange(a1Of(intent.mark)) as never,
+            marked.previousFill,
+            workbook.getId(),
+          )
+        } catch {
+          // A cell the grid will not hand out (filtered out, never loaded) is
+          // not a reason to keep the mark; the mark is already gone.
+        }
+      }
+      return
+    }
+    // A single cell offers its own text as the label, so the common case is
+    // one word of typing; a range has no text and starts empty.
+    let seed = ''
+    if (request.isSingleCell) {
+      try {
+        seed =
+          (
+            workbook
+              ?.getSheetBySheetId(request.sheetId)
+              ?.getRange(`${columnLabel(request.startColumn)}${request.startRow + 1}`)
+              .getValue() as string | undefined
+          )?.slice(0, 24) ?? ''
+      } catch {
+        // An unreadable cell just means no seed offered.
+      }
+    }
+    setRedactDialog({ ...intent.dialog, seed })
+    if (sheetName === undefined) setRedactDialog(null)
+  }
+
+  /** Commit the label the reader typed. */
+  function onRedactConfirm(label: string) {
+    const pending = redactDialog
+    setRedactDialog(null)
+    if (!pending) return
+    const clean = sanitizeLabel(label)
+    if (!clean) return
+    const workbook = univerRef.current?.univerAPI.getActiveWorkbook()
+    const worksheet = workbook?.getSheetBySheetId(pending.sheetId)
+    // A mark is written into the package part, so it has to name the cell the
+    // FILE has, not the one the grid is showing: this session may have
+    // inserted rows above it that the file has never seen. `screenToFile`
+    // answers null for a row inserted this session — it has no file coordinate
+    // to write down — so the reader is told to save rather than handed a mark
+    // the save would later shift a second time.
+    const ops = lazyWorkbookRef.current?.editJournal.structuralOps.get(pending.sheetId) ?? []
+    const startRow = screenToFile(ops, 'row', pending.startRow)
+    const endRow = screenToFile(ops, 'row', pending.endRow)
+    const startColumn = screenToFile(ops, 'column', pending.startColumn)
+    const endColumn = screenToFile(ops, 'column', pending.endColumn)
+    if (startRow === null || endRow === null || startColumn === null || endColumn === null) {
+      showToast(t('redactNeedsSavedRow'), 'error')
+      return
+    }
+    const inFile = { startRow, endRow, startColumn, endColumn }
+    // buildMark reads the fill, paints the tint and returns both, so the mark
+    // cannot be assembled without the value that has to be restored later. The
+    // tint is drawn on the grid, so it takes the screen bounds.
+    let mark: MarkKey & { label: string; previousFill: string | null } = {
+      ...inFile,
+      label: clean,
+      previousFill: null,
+    }
+    try {
+      if (worksheet) {
+        mark = buildMark(worksheet, a1Of(pending), clean, {
+          startRow: pending.startRow,
+          endRow: pending.endRow,
+          startColumn: pending.startColumn,
+          endColumn: pending.endColumn,
+        })
+        // buildMark echoes the bounds it was handed; the stored copy is the
+        // file-coord one, the painted one is the screen one.
+        mark = { ...mark, ...inFile }
+      }
+    } catch {
+      // A range the grid will not hand out still gets its mark; it just goes
+      // unmarked on screen, which is the same state the reader is in anyway
+      // for a sheet that has not finished streaming.
+    }
+    const next = addMark(redactionStatesRef.current, pending.sheetName, mark)
+    redactionStatesRef.current = next
+    // Not `indexFor(next, …)`: the states are in file coordinates now, and the
+    // index the grid reads has to be the screen ones. The same replay the
+    // loaded marks go through covers this one.
+    rebuildRedactionIndex()
+  }
+
+  /** `A1:B2` for a mark's rectangle, for the range the tint is painted on. */
+  function a1Of(area: {
+    startRow: number
+    endRow: number
+    startColumn: number
+    endColumn: number
+  }): string {
+    return (
+      `${columnLabel(area.startColumn)}${area.startRow + 1}:` +
+      `${columnLabel(area.endColumn)}${area.endRow + 1}`
+    )
   }
 
   function sheetsSkillDeps(): SheetsSkillDeps {
@@ -1738,6 +2071,7 @@ export function App({
         traceWorkbookPrecedents(readContext(), sheetId, address),
       traceDependents: (sheetId, address) =>
         traceWorkbookDependents(readContext(), sheetId, address),
+      redactions: () => redactionIndexRef.current ?? NO_REDACTIONS,
       proposeOperations,
       createDocument: (request) => createAiDocument({ univerRef, lazyWorkbookRef }, request),
     }
@@ -1782,7 +2116,10 @@ export function App({
           numberAsTextAlertLocale(UniverPresetSheetsCoreEnUS),
           // last wins per namespace: feed the alert-patched pack through so
           // both sheets-ui patches survive the shallow merge
-          insertRowsBelowLocale(numberAsTextAlertLocale(UniverPresetSheetsCoreEnUS)),
+          hideFromAiLocale(
+            insertRowsBelowLocale(numberAsTextAlertLocale(UniverPresetSheetsCoreEnUS)),
+            'en',
+          ),
         ),
       },
       presets: [
@@ -1899,11 +2236,17 @@ export function App({
     // Paragraph-sized plain text cells: draw only the slice that can reach the
     // clip box instead of shaping the whole string every frame.
     installLongTextRender()
+    // A whole-cell superscript/subscript (Home ribbon, or <vertAlign> in the
+    // file) must draw raised/lowered; Univer's plain painter ignores `va`.
+    installVertAlignRender()
     installAutofitWrapBudget()
     // Wrapped auto rows must stack Excel's per-font row height, not the
     // canvas line box (Calibri 10: 12.75 pt per line, not ~10 pt).
     installAutofitLinePitch()
     installHeaderUnhideDebounce()
+    // The dashed border on a copied range is a per-frame animation. It must
+    // not keep repainting the scene while nobody is looking at it.
+    installCopyAnimationIdle()
     installNumberAsTextAlertSeverity()
     installForceStringMarkGate(runtime.univer.__getInjector().get(SheetInterceptorService))
     // Hold the formula engine's per-chunk recalculation while file data streams
@@ -1999,6 +2342,10 @@ export function App({
       },
     })
     const ctrlDragFillDisposable = installCtrlDragFill(runtime)
+    // The grid's right-click item that withholds the selected cells from the
+    // AI. Contributed to Univer's own menu rather than replacing it, so every
+    // built-in item keeps working.
+    const redactMenuDisposable = installRedactMenu(runtime, onRedactSelection)
     // A context-menu submenu re-hovered within Univer's close delay stays
     // invisible; re-trigger its positioning (genoffice#337).
     const contextSubmenuReopenDisposable = installContextSubmenuReopenFix()
@@ -2196,6 +2543,7 @@ export function App({
     const sheetDisposable = runtime.univerAPI.addEvent(
       runtime.univerAPI.Event.ActiveSheetChanged,
       ({ activeSheet }) => {
+        setActiveSheetId(activeSheet.getSheetId())
         setAiSelectionAskAnchor(null)
         void loadVisibleRange(runtime, lazyWorkbookRef, activeSheet, setMessage)
         // formula view is per-sheet (sheetView/@showFormulas)
@@ -2300,6 +2648,7 @@ export function App({
         if (
           event.id !== SET_RANGE_VALUES_MUTATION &&
           event.id !== SET_NUMFMT_MUTATION &&
+          event.id !== REMOVE_NUMFMT_MUTATION &&
           !rowColumn &&
           !merge &&
           !axisAttr &&
@@ -2815,12 +3164,14 @@ export function App({
         const recorded =
           event.id === SET_NUMFMT_MUTATION
             ? recordSetNumfmt(state.editJournal, params.subUnitId, params)
-            : recordSetRangeValues(
-                state.editJournal,
-                params.subUnitId,
-                params.cellValue,
-                sharedFormulaResolverFor(runtime, params.subUnitId),
-              )
+            : event.id === REMOVE_NUMFMT_MUTATION
+              ? recordRemoveNumfmt(state.editJournal, params.subUnitId, params)
+              : recordSetRangeValues(
+                  state.editJournal,
+                  params.subUnitId,
+                  params.cellValue,
+                  sharedFormulaResolverFor(runtime, params.subUnitId),
+                )
         if (recorded.length === 0) return
         setPendingEdits(journalSize(state.editJournal))
         const contentEdited = recorded.some(
@@ -3073,14 +3424,6 @@ export function App({
             event.cancel = true
             setMessage(t('appPivotSheetNoMove'))
             return
-          }
-          if (
-            FILTER_COMMAND_PATTERN.test(event.id) &&
-            subUnitId !== undefined &&
-            state.filterOrigins.get(subUnitId)?.origin === 'table'
-          ) {
-            event.cancel = true
-            setMessage(t('appTableFilterNoEdit'))
           }
           return
         }
@@ -3398,6 +3741,7 @@ export function App({
       arrowCollapseDisposable.dispose()
       sheetProtectionDisposable.dispose()
       ctrlDragFillDisposable.dispose()
+      redactMenuDisposable.dispose()
       contextSubmenuReopenDisposable.dispose()
       multiRowAutofitDisposable.dispose()
       cellContextMenuDisposable.dispose()
@@ -3477,6 +3821,9 @@ export function App({
     // bubble, images multimodal, files via the files skill) and the composer clears.
     // Retry passes the failed message's original set instead.
     const sentAtts = overrideAttachments ?? attachmentsRef.current
+    // skills ride with this one message only: the chips clear like attachments do
+    const sentSkills = overrideInstruction ? [] : attachedSkillsRef.current
+    if (sentSkills.length > 0) setAttachedSkills([])
     const agentConfigured = isAgentConfigured()
     // Retry re-sends in place: drop the failed bubble and its error reply instead
     // of stacking a "Not sent" duplicate above the resent copy.
@@ -3502,6 +3849,7 @@ export function App({
       tools: [],
       persisted,
       ...(sentAtts.length > 0 ? { attachments: sentAtts } : {}),
+      ...(sentSkills.length > 0 ? { skills: sentSkills } : {}),
       ...(scope ? { scope } : {}),
     })
     if (!overrideInstruction) setPrompt('')
@@ -3518,7 +3866,7 @@ export function App({
     // otherwise fall back to the local, deterministic regex planner
     // (kept for offline use and for the fixed micro-DSL it still supports).
     if (agentConfigured) {
-      runAgent(instruction, sentAtts)
+      runAgent(instruction, sentAtts, sentSkills)
       return
     }
     const outcome = runDeterministicPlan(instruction)
@@ -4019,6 +4367,21 @@ export function App({
     setMessage(t('appPageBreakPreviewOn'))
   }
 
+  /**
+   * The pictures put into notes this session, so the pane can show them
+   * before the save writes them into the file.
+   */
+  function pendingNotePictures(): PendingNotePicture[] {
+    const journal = lazyWorkbookRef.current?.editJournal
+    if (!journal) return []
+    return journal.notePictures.map((entry) => ({
+      sheetId: entry.sheetId,
+      row: entry.row,
+      column: entry.column,
+      dataUrl: entry.picture?.dataUrl ?? null,
+    }))
+  }
+
   /** App-scope refs/state bundle for the extracted ribbon dispatcher (ribbon-actions.ts). */
   function ribbonContext(): RibbonCommandContext {
     return {
@@ -4092,7 +4455,36 @@ export function App({
     )
   }
 
+  /// A clicked ribbon button keeps DOM focus, so arrow-key cell navigation
+  /// dies until the user clicks the grid — Excel hands the keyboard straight
+  /// back. Only the button that issued the command is sent back: text fields
+  /// commit on blur (focus is already moving on, e.g. Tab to the next box) and
+  /// the More Colors native input applies live while its picker stays open.
+  /// Two frames let a dialog or panel the command opened claim focus first.
+  function handleRibbonCommandFromRibbon(command: string): void {
+    const source = document.activeElement
+    handleRibbonCommand(command)
+    if (!(source instanceof HTMLElement) || !source.closest('[data-ribbon-body]')) return
+    if (source.matches('input, select, textarea, [contenteditable="true"]')) return
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        const active = document.activeElement
+        // a palette swatch unmounts when the popover closes, dropping focus to body
+        const dropped = !source.isConnected && (active === null || active === document.body)
+        if (active !== source && !dropped) return
+        source.blur()
+        focusSheetGrid()
+      }),
+    )
+  }
+
   function handleRibbonCommand(command: string): void {
+    if (command === 'workbook-change-password') {
+      if (lazyWorkbookRef.current?.file.passwordProtected) {
+        setChangeWorkbookPasswordOpen(true)
+      }
+      return
+    }
     if (command === 'watch-window') {
       setWatchOpen((open) => !open)
       return
@@ -4113,6 +4505,23 @@ export function App({
       document.getElementById('univer-container')?.classList.toggle('formula-bar-hidden', !next)
       setFormulaBarVisible(next)
       setMessage(t(next ? 'appFormulaBarShown' : 'appFormulaBarHidden'))
+      return
+    }
+    if (command === 'spell-check') {
+      // the preference gates the whole feature: F7 and the Review button both
+      // land here, so a disabled checker is one consistent answer everywhere
+      if (!spellcheckOn) {
+        setMessage(t('appSpellOff'))
+        return
+      }
+      setSpellDialogOpen(true)
+      return
+    }
+    if (command === 'spellcheck-toggle') {
+      const next = !spellcheckOn
+      setSpellcheckOn(next)
+      storeSpellcheckEnabled(next)
+      setMessage(t(next ? 'appSpellOn' : 'appSpellOff'))
       return
     }
     const runtime = univerRef.current
@@ -4391,6 +4800,7 @@ export function App({
         engineOverBudget: recalcOverBudgetAtOpen(selected.fileBytes, cellCounts.gridCells),
         formulaCells: new Map(),
         overlay: new Map(),
+        incompleteRuns: new Set(),
         follow: new Map(),
         running: false,
         lastRunAt: 0,
@@ -4412,6 +4822,43 @@ export function App({
     }
     lazyWorkbookRef.current = state
     void loadRowOutlines(state, lazyWorkbookRef)
+    // The cells the reader withheld, read once per open: every read tool asks
+    // about cells, so a lazy read would either cost an archive read per call or
+    // leave a window in which the model sees the real values. The next workbook
+    // starts from nothing until its own read lands, and a part that exists but
+    // cannot be read withholds everything rather than nothing — see
+    // ai/redact-load.ts.
+    redactionIndexRef.current = null
+    redactionStatesRef.current = []
+    loadedRedactionStatesRef.current = null
+    void window.desktopApi
+      .readWorkbookRedactions({ sessionId: selected.sessionId })
+      .then((result) => {
+        // A superseded session's answer must not install its marks.
+        if (lazyWorkbookRef.current !== state) return
+        const session = redactionSessionFor(result, getActiveSheetInfo().sheets, t)
+        redactionIndexRef.current = session.index
+        redactionStatesRef.current = result.status === 'ok' ? result.states : []
+        watchStructuralEditsForMarks()
+        // What the file holds is the baseline a later edit is measured against;
+        // an unreadable part has no baseline, and saves leave it in place.
+        loadedRedactionStatesRef.current =
+          result.status === 'unreadable' ? null : redactionStatesRef.current
+        const redactionMessage = session.error ?? session.notice
+        if (redactionMessage !== null) setMessage(redactionMessage)
+      })
+      .catch((error: unknown) => {
+        if (lazyWorkbookRef.current !== state) return
+        // The read itself failed, so the marks are unknown — the same state a
+        // damaged part produces, and the same answer: withhold, and say so.
+        const reason = error instanceof Error ? error.message : String(error)
+        redactionIndexRef.current = redactionSessionFor(
+          { status: 'unreadable', error: reason },
+          [],
+          t,
+        ).index
+        setMessage(reason)
+      })
     // Pivot definitions load eagerly so refresh (a synchronous apply step)
     // never waits on IPC. Best effort: a failed parse just disables refresh.
     for (const sheet of selected.sheets) {
@@ -4558,6 +5005,7 @@ export function App({
         }
         // apply the opening sheet's formula view (sheetView/@showFormulas)
         applyShowFormulasView(runtime, state, worksheet.getSheetId())
+        setActiveSheetId(worksheet.getSheetId())
         queueVisualInstall(
           runtime,
           lazyWorkbookRef,
@@ -4666,11 +5114,34 @@ export function App({
       if (!window.desktopApi) {
         throw new Error(t('appBridgeUnavailable'))
       }
-      const selected = await window.desktopApi.selectWorkbook()
+      let selected = await window.desktopApi.selectWorkbook()
       if (!selected) {
         setMessage(t('appOpenCanceled'))
         finishOpening()
         return
+      }
+      if ('passwordRequired' in selected) {
+        const encryptedPath = selected.path
+        let passwordError: string | null = null
+        let decryptedWorkbook: WorkbookFile | null = null
+        while (decryptedWorkbook === null) {
+          const password = await requestEncryptedWorkbookPassword(passwordError)
+          if (password === null) break
+          try {
+            decryptedWorkbook = await window.desktopApi.openEncryptedWorkbook(
+              encryptedPath,
+              password,
+            )
+          } catch (error: unknown) {
+            passwordError = error instanceof Error ? error.message : t('appOpenFailed')
+          }
+        }
+        selected = decryptedWorkbook
+        if (!selected) {
+          setMessage(t('appOpenCanceled'))
+          finishOpening()
+          return
+        }
       }
       if (!(await openLazyWorkbook(selected, { onInitialRangeLoaded: finishOpening }))) {
         finishOpening()
@@ -4689,6 +5160,7 @@ export function App({
     mode: 'save' | 'save-as' | 'recovery',
     quiet = false,
     explicitTarget?: { path: string; overwrite: boolean },
+    defaultName?: string,
   ): Promise<SaveOutcome> {
     // Manual and AI saves take the same gate as the timers: a recovery copy
     // written beside a real save would outlive it as a phantom Restore prompt.
@@ -4696,8 +5168,60 @@ export function App({
     if (mode === 'recovery' && gate.busy) return { ok: false }
     return gate.run(async () => {
       if (!(await commitActiveEditor())) return { ok: false }
-      return handleSaveImpl(saveContext(), mode, quiet, explicitTarget)
+      return handleSaveImpl(saveContext(), mode, quiet, explicitTarget, defaultName)
     })
+  }
+  async function updateWorkbookPassword(newPassword: string): Promise<string | null> {
+    try {
+      return await saveGateRef.current.run(async () => {
+        if (!(await commitActiveEditor())) return t('appSaveFailed')
+        const beforeSave = lazyWorkbookRef.current
+        if (!beforeSave?.file.passwordProtected) {
+          return t('appWorkbookNotPasswordProtected')
+        }
+
+        // Commit all current sheet edits before changing the package password.
+        // The sidecar snapshot stays plaintext for this session, while the
+        // main process updates the encrypted file atomically on disk.
+        const saved = await handleSaveImpl(saveContext(), 'save', true)
+        const current = lazyWorkbookRef.current
+        if (!current) return t('appWorkbookNotReady')
+        if (!saved.ok && journalSize(current.editJournal) > 0) {
+          return saved.error ?? t('appSaveFailed')
+        }
+        if (!current.file.passwordProtected) {
+          return t('appWorkbookNotPasswordProtected')
+        }
+
+        const result = await window.desktopApi.updateWorkbookPassword(
+          current.file.sessionId,
+          newPassword,
+        )
+        const file: WorkbookFile = { ...current.file, ...result }
+        lazyWorkbookRef.current = { ...current, file }
+        setWorkbookFile(file)
+        setMessage(t('appWorkbookPasswordChanged'))
+        return null
+      })
+    } catch (error: unknown) {
+      return error instanceof Error ? error.message : t('appSaveFailed')
+    }
+  }
+
+  /**
+   * Ask the model to name this workbook, on request, then open Save As with its
+   * answer prefilled.
+   *
+   * The stem goes into the dialog rather than renaming the file on disk: a
+   * workbook that may be open in another window, referenced from a note, or
+   * synced is not something to move behind the reader's back. A declined or
+   * empty answer leaves the dialog on the workbook's current name, so this is a
+   * no-op rather than a failure.
+   */
+  async function nameWithAi(): Promise<void> {
+    const stem = await modelSaveAsName(readContext())
+    if (!stem) return
+    await handleSave('save-as', false, undefined, stem)
   }
   closeSaveRef.current = async () => {
     if (!(await commitActiveEditor())) {
@@ -4991,6 +5515,19 @@ export function App({
     }
   })()
 
+  // Formula view is per sheet and persisted (sheetView/@showFormulas), so a
+  // sheet can open showing formulas instead of values. The status bar says so;
+  // without it the sheet reads as a broken one. activeSheetId is state so a
+  // sheet switch re-renders this even when nothing else changed.
+  const activeShowFormulas = (() => {
+    const state = lazyWorkbookRef.current
+    const sheetId =
+      activeSheetId ??
+      univerRef.current?.univerAPI.getActiveWorkbook()?.getActiveSheet()?.getSheetId()
+    if (!sheetId || !state) return false
+    return formulaViewSheets(state).has(sheetId)
+  })()
+
   // Chart panels resolve their chart live (pending edits applied), so every
   // control reflects the state the next save would write.
   const visualDialogTarget = (() => {
@@ -5157,10 +5694,22 @@ export function App({
         printHost={printHost}
         onClosePrint={() => setPrintHost(null)}
         calcManual={calcManual}
+        showFormulas={activeShowFormulas}
         onGoalSeek={(setCell, toValue, byCell) => {
           const runtime = univerRef.current
           if (!runtime) return Promise.reject(new Error(t('appWorkbookNotReady')))
           return solveGoalSeek(runtime, { setCell, toValue, byCell })
+        }}
+        onDataTable={(input) => {
+          const runtime = univerRef.current
+          if (!runtime) return Promise.reject(new Error(t('appWorkbookNotReady')))
+          return applyDataTable(runtime, input)
+        }}
+        onGetDataTableRange={() => {
+          // Excel's flow starts from the selected table region; a single-cell
+          // selection cannot be a data table, so the field starts empty.
+          const range = univerRef.current?.univerAPI.getActiveWorkbook()?.getActiveRange()
+          return range && range.getHeight() > 1 && range.getWidth() > 1 ? range.getA1Notation() : ''
         }}
         onFillSeries={(options) => {
           const runtime = univerRef.current
@@ -5180,6 +5729,8 @@ export function App({
         chat={chat}
         historicChat={historicChat}
         attachments={attachments}
+        attachedSkills={attachedSkills}
+        onToggleSkill={toggleSkill}
         attachNotice={attachNotice}
         onPickAttachments={() => void handlePickAttachments()}
         onAddAttachmentPaths={(paths) => void handleAddAttachmentPaths(paths)}
@@ -5202,7 +5753,7 @@ export function App({
         onAiCitation={handleAiCitation}
         canUndo={univerHist.canUndo || (!lazyWorkbookRef.current && adapterRef.current.canUndo)}
         canRedo={univerHist.canRedo}
-        onCommand={handleRibbonCommand}
+        onCommand={handleRibbonCommandFromRibbon}
         onIsCellEditing={isCellEditing}
         zoomPercent={zoomPercent}
         statusBarFuncs={statusBarFuncs}
@@ -5211,6 +5762,7 @@ export function App({
         onSave={() => void handleSave('save')}
         canSaveAs={workbookFile !== null}
         onSaveAs={() => void handleSave('save-as')}
+        onNameWithAi={() => void nameWithAi()}
         onRedo={handleRedo}
         autoSave={autoSave}
         onAutoSaveChange={setAutoSave}
@@ -5234,6 +5786,8 @@ export function App({
         onUnprotectSheet={unprotectActiveSheet}
         sheetTabActions={sheetTabActions}
         onGetWorkbookProtection={workbookProtectionEcho}
+        passwordProtected={workbookFile?.passwordProtected === true}
+        spellcheckOn={spellcheckOn}
         formulaBarVisible={formulaBarVisible}
         crossHighlightVisible={crossHighlightVisible}
         onGetProtectedRanges={protectedRangesSnapshot}
@@ -5254,6 +5808,11 @@ export function App({
         activeCellA1={activeCellA1}
         onGoToReference={(ref) => goToReferenceImpl(dataToolsContext(), ref)}
         onListDefinedNames={() => listDefinedNamesImpl(dataToolsContext())}
+        onReadWorkbookQueries={() =>
+          workbookFile
+            ? window.desktopApi.readWorkbookQueries({ sessionId: workbookFile.sessionId })
+            : Promise.resolve([])
+        }
         onReadPasteSpecialSource={readPasteSpecialSourceFromRuntime}
         onPasteSpecial={handlePasteSpecial}
         functionArguments={functionArgumentsHost}
@@ -5271,9 +5830,37 @@ export function App({
           {t('appOpeningWorkbook')}
         </div>
       )}
+      {encryptedPasswordPrompt && (
+        <EncryptedWorkbookPasswordDialog
+          error={encryptedPasswordPrompt.error}
+          onSubmit={(password) => answerEncryptedWorkbookPassword(password)}
+          onClose={() => answerEncryptedWorkbookPassword(null)}
+        />
+      )}
+      {changeWorkbookPasswordOpen && (
+        <ChangeWorkbookPasswordDialog
+          onSubmit={updateWorkbookPassword}
+          onClose={() => setChangeWorkbookPasswordOpen(false)}
+        />
+      )}
       <ThreadedCommentsPane getRuntime={getRuntime} />
-      <NotePicturesPane file={workbookFile} getRuntime={getRuntime} />
+      <NotePicturesPane
+        file={workbookFile}
+        pending={pendingNotePictures()}
+        onRemove={(sheetId, row, column) =>
+          handleRemoveNotePicture(ribbonContext(), sheetId, row, column)
+        }
+        getRuntime={getRuntime}
+      />
       <ThreadHoverCard hover={threadHover} />
+      {redactDialog && (
+        <RedactDialog
+          seed={redactDialog.seed}
+          rangeLabel={redactDialog.rangeLabel}
+          onSubmit={onRedactConfirm}
+          onCancel={() => setRedactDialog(null)}
+        />
+      )}
       {findReplaceService && (
         <FindReplacePanel
           service={findReplaceService}
@@ -5296,6 +5883,30 @@ export function App({
               .registerContainerElement(element)
             return () => disposable?.dispose()
           }}
+        />
+      )}
+      {spellDialogOpen && (
+        <SpellingDialog
+          onClose={() => setSpellDialogOpen(false)}
+          getWorkbook={() => univerRef.current?.univerAPI.getActiveWorkbook() ?? null}
+          isWithheld={(sheetId, row, column) =>
+            (redactionIndexRef.current ?? NO_REDACTIONS).labelAt(sheetId, row, column) !== null
+          }
+          onJumpTo={(sheetId, row, column) => {
+            void selectWorkbookRange(
+              readContext(),
+              sheetId,
+              { startRow: row, endRow: row, startColumn: column, endColumn: column },
+              setMessage,
+            )
+          }}
+          lazyNote={
+            lazyWorkbookRef.current && !lazyWorkbookRef.current.flags.preloadComplete
+              ? t('appLoadedRegionOnly')
+              : ''
+          }
+          sessionIgnoredRef={spellSessionIgnoredRef}
+          setMessage={setMessage}
         />
       )}
       {cellsDialog !== null && univerRef.current && (
@@ -5514,7 +6125,13 @@ export function App({
 
   /// The active sheet's allow-edit ranges, or an error the dialog surfaces.
   function protectedRangesSnapshot(): {
-    ranges: readonly { name: string; sqref: string; hasPassword: boolean }[]
+    ranges: readonly {
+      name: string
+      sqref: string
+      hasPassword: boolean
+      /** the hash, when this session computed it; a file's own hashes stay in the file */
+      password?: SheetPasswordHash
+    }[]
     error: string | null
   } {
     const state = lazyWorkbookRef.current
@@ -5527,20 +6144,43 @@ export function App({
     return { ranges: file ?? [], error: null }
   }
 
-  function applyProtectedRanges(ranges: readonly { name: string; sqref: string }[]): string | null {
+  async function applyProtectedRanges(
+    ranges: readonly { name: string; sqref: string; password?: string }[],
+  ): Promise<string | null> {
     const state = lazyWorkbookRef.current
     const sheetId = univerRef.current?.univerAPI.getActiveWorkbook()?.getActiveSheet()?.getSheetId()
     if (!state || !sheetId) return t('appProtectionNeedsFile')
     const snapshot = protectedRangesSnapshot()
     if (snapshot.error !== null) return snapshot.error
-    // A rewrite cannot preserve per-range password hashes; fail closed.
-    if (snapshot.ranges.some((range) => range.hasPassword)) {
+    // A rewrite cannot preserve password hashes it does not know; fail closed.
+    // A hash this session computed travels in the request and survives.
+    if (snapshot.ranges.some((range) => range.hasPassword && range.password === undefined)) {
       return t('appRangesPasswordBlocked')
     }
-    state.sheetProtectedRanges.set(
-      sheetId,
-      ranges.map((range) => ({ name: range.name, sqref: range.sqref, hasPassword: false })),
+    const kept = new Map(snapshot.ranges.map((range) => [range.name, range]))
+    const hashed = await Promise.all(
+      ranges.map(async (range) => {
+        if (range.password) {
+          return {
+            name: range.name,
+            sqref: range.sqref,
+            hasPassword: true,
+            password: await hashSheetPassword(range.password),
+          }
+        }
+        const prior = kept.get(range.name)
+        if (prior?.password !== undefined) {
+          return {
+            name: range.name,
+            sqref: range.sqref,
+            hasPassword: true,
+            password: prior.password,
+          }
+        }
+        return { name: range.name, sqref: range.sqref, hasPassword: false }
+      }),
     )
+    state.sheetProtectedRanges.set(sheetId, hashed)
     recordProtectedRangesChange(state.editJournal, sheetId)
     setPendingEdits(journalSize(state.editJournal))
     setMessage(t('appRangesRecorded', { count: ranges.length }))

@@ -189,6 +189,7 @@ export const pl = {
   appCtxSendToBack: 'Przesuń na spód',
   appCtxBringForward: 'Przesuń do przodu',
   appCtxSendBackward: 'Przesuń do tyłu',
+  appCtxRotate: 'Obróć',
   appCtxRotateLeft90: 'Obróć o 90° w lewo',
   appCtxRotateRight90: 'Obróć o 90° w prawo',
   appCtxFlipH: 'Przerzuć w poziomie',
@@ -228,6 +229,8 @@ export const pl = {
   appMasterFillNone: 'Brak wypełnienia',
   appMasterStroke: 'Kolor konturu…',
   appMasterStrokeNone: 'Brak konturu',
+  appMasterInsertTextBox: 'Pole tekstowe',
+  appMasterInsertShape: 'Kształty',
   appStartOpening: 'Otwieranie…',
   appReadingSlideTitle:
     'Kliknij, aby przejść do następnego slajdu (Esc, aby wyjść z widoku do czytania)',

@@ -190,6 +190,7 @@ export const pt = {
   appCtxSendToBack: 'Enviar para Trás',
   appCtxBringForward: 'Avançar',
   appCtxSendBackward: 'Recuar',
+  appCtxRotate: 'Girar',
   appCtxRotateLeft90: 'Girar 90° para a Esquerda',
   appCtxRotateRight90: 'Girar 90° para a Direita',
   appCtxFlipH: 'Inverter Horizontalmente',
@@ -229,6 +230,8 @@ export const pt = {
   appMasterFillNone: 'Sem Preenchimento',
   appMasterStroke: 'Cor do Contorno…',
   appMasterStrokeNone: 'Sem Contorno',
+  appMasterInsertTextBox: 'Caixa de Texto',
+  appMasterInsertShape: 'Formas',
   appStartOpening: 'Abrindo…',
   appReadingSlideTitle:
     'Clique para ir ao próximo slide (Esc para sair do Modo de Exibição de Leitura)',

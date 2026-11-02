@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { placeLine, type ObstacleRect } from '../src/renderer/editor/wrap-obstacles'
+import {
+  bandGapRows,
+  floatStacks,
+  placeLine,
+  type FloatBox,
+  type ObstacleRect,
+} from '../src/renderer/editor/wrap-obstacles'
 import { computeSectionedSlicesF2, type BlockBox } from '../src/renderer/pagination'
 
 // column 0..624 px (468pt), 200pt picture = 266.7 px, 9pt clearance = 12 px
@@ -113,5 +119,82 @@ describe('anchor paragraph page turn (Word probe 2026-10-13)', () => {
   it('never turns a page it opens', () => {
     const blocks: BlockBox[] = [anchor(0, 1200, 1200), { top: 20, height: 20 }]
     expect(computeSectionedSlicesF2(blocks, geoms, 40)[0].start).toBe(0)
+  })
+})
+
+describe('bandGapRows (prod corpus 20261020 sample 026, stat tiles above a title bar)', () => {
+  // anchor line 6 px; hairline at 8, five tiles 18..84, title bar 94..127
+  const bands: Array<[number, number]> = [
+    [8, 9],
+    [18, 84],
+    [18, 84],
+    [18, 84],
+    [18, 84],
+    [18, 84],
+    [94, 127],
+  ]
+
+  it('merges overlapping tiles and keeps the rows between the bands', () => {
+    expect(bandGapRows(bands, 6)).toEqual([
+      [8, 9],
+      [18, 84],
+      [94, 127],
+    ])
+  })
+
+  it('a single band hugging the anchor line keeps the union-band route', () => {
+    expect(bandGapRows([[0, 60]], 20)).toBeNull()
+    expect(bandGapRows([[22, 60]], 20)).toBeNull()
+  })
+
+  it('a band starting well below the anchor line leaves a usable row', () => {
+    expect(bandGapRows([[40, 60]], 20)).toEqual([[40, 60]])
+  })
+
+  it('ignores degenerate intervals', () => {
+    expect(
+      bandGapRows(
+        [
+          [10, 10],
+          [Number.NaN, 5],
+        ],
+        6,
+      ),
+    ).toBeNull()
+  })
+})
+
+describe('floatStacks (Word probe 2026-11-02, D1-D3)', () => {
+  const right = (top: number, bottom: number): FloatBox => ({
+    side: 'right',
+    left: 390 - 12,
+    right: 666 + 12,
+    top,
+    bottom,
+  })
+  const left = (top: number, bottom: number): FloatBox => ({
+    side: 'left',
+    left: -12,
+    right: 276 + 12,
+    top,
+    bottom,
+  })
+
+  it('a same-side float overlapping the picture vertically displaces it', () => {
+    expect(floatStacks(right(120, 300), [right(0, 172)])).toBe(true)
+  })
+
+  it('a same-side float that ended above the picture leaves it alone', () => {
+    expect(floatStacks(right(172, 344), [right(0, 172)])).toBe(false)
+  })
+
+  it('an opposite float displaces only when the margin boxes meet horizontally', () => {
+    expect(floatStacks(right(120, 300), [left(0, 172)])).toBe(false)
+    const wide = { ...left(0, 172), right: 400 }
+    expect(floatStacks(right(120, 300), [wide])).toBe(true)
+  })
+
+  it('no earlier floats: never', () => {
+    expect(floatStacks(right(0, 172), [])).toBe(false)
   })
 })

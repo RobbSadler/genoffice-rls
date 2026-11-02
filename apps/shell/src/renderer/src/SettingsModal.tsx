@@ -18,7 +18,6 @@ import {
   MIN_MAX_OUTPUT_TOKENS,
   activeCustomEndpoint,
   clampMaxOutputTokens,
-  providerPickerModels,
   customEndpointLabel,
   newCustomEndpointId,
   removeCustomEndpoint,
@@ -49,6 +48,7 @@ import type {
 } from '../../shared/home-api'
 import { ProviderLogo } from './provider-logos'
 import { IntegrationsPane, skillUpdateDue } from './IntegrationsPane'
+import { FoundSkills } from './FoundSkills'
 import './settings.css'
 
 // ── Settings modal (opened from the account menu) ─────────
@@ -76,6 +76,7 @@ const LANG_OPTIONS = [
   { value: 'pt', label: 'Português' },
   { value: 'ru', label: 'Русский' },
   { value: 'th', label: 'ไทย' },
+  { value: 'tr', label: 'Türkçe' },
   { value: 'vi', label: 'Tiếng Việt' },
   { value: 'zh', label: '简体中文' },
   { value: 'zh-TW', label: '繁體中文' },
@@ -168,7 +169,8 @@ function CustomFontSizeInput({
   )
 }
 
-export type SectionId = 'account' | 'aiModel' | 'aiMedia' | 'general' | 'integrations' | 'about'
+export type SectionId =
+  'account' | 'aiModel' | 'aiMedia' | 'general' | 'integrations' | 'skills' | 'about'
 
 const SECTIONS: readonly { id: SectionId; labelKey: StringKey }[] = [
   { id: 'account', labelKey: 'setSecAccount' },
@@ -176,6 +178,7 @@ const SECTIONS: readonly { id: SectionId; labelKey: StringKey }[] = [
   { id: 'aiMedia', labelKey: 'setSecAiMedia' },
   { id: 'general', labelKey: 'setSecGeneral' },
   { id: 'integrations', labelKey: 'setSecIntegrations' },
+  { id: 'skills', labelKey: 'setSecSkills' },
   { id: 'about', labelKey: 'setSecAbout' },
 ]
 
@@ -223,6 +226,20 @@ function SectionIcon({ id }: { id: SectionId }) {
           strokeWidth="1.3"
           strokeLinecap="round"
         />
+      </svg>
+    )
+  }
+  if (id === 'skills') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path
+          d="M3 3.5h6.5l3.5 3.5v5.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1Z"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinejoin="round"
+        />
+        <path d="M9.5 3.5V7H13" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+        <path d="M5 10.5h6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
       </svg>
     )
   }
@@ -704,7 +721,7 @@ function AiModelPane({ t }: { t: TFunc }) {
             className="set-dd"
             value={config.model || meta.defaultModel}
             ariaLabel={t('setAiModelId')}
-            options={providerPickerModels(provider, meta.models, config.model).map((m) => ({
+            options={meta.models.map((m) => ({
               value: m,
               label: m,
             }))}
@@ -1061,6 +1078,7 @@ const DECISION_ENDPOINTS: { value: DecisionEndpoint; label: string }[] = [
   { value: 'perplexity-flash', label: 'Perplexity (Flash v1.2)' },
   { value: 'liquid', label: 'Liquid AI (d1)' },
   { value: 'liquid-ultra', label: 'Liquid AI (d1-ultra)' },
+  { value: 'openai', label: 'OpenAI (gpt-6-luna)' },
   { value: 'cloudflare', label: 'Cloudflare (Clef)' },
   { value: 'cloudflare-flash', label: 'Cloudflare (Clef-flash)' },
   { value: 'kev', label: 'Kev (local)' },
@@ -1538,11 +1556,13 @@ function AiMediaPane({
             ? t('setAiSearchGensparkHint')
             : search.provider === 'parallel'
               ? t('setAiSearchParallelHint')
-              : search.provider === 'serply'
-                ? t('setAiSearchSerplyHint')
-                : searchMeta?.imageSearch
-                  ? t('setAiSearchSerperHint')
-                  : t('setAiSearchTavilyHint')}
+              : search.provider === 'keenable'
+                ? t('setAiSearchKeenableHint')
+                : search.provider === 'serply'
+                  ? t('setAiSearchSerplyHint')
+                  : searchMeta?.imageSearch
+                    ? t('setAiSearchSerperHint')
+                    : t('setAiSearchTavilyHint')}
         </div>
         {search.provider !== 'genspark' &&
           keyRow('set-ai-search-key', searchKey, searchMeta?.keyPlaceholder ?? 'API Key', (v) =>
@@ -1745,11 +1765,16 @@ export function SettingsModal({
   const [analyticsOn, setAnalyticsOn] = useState(true)
   const [analyticsSaving, setAnalyticsSaving] = useState(false)
   const [autoSaveOn, setAutoSaveOn] = useState(false)
+  const [tabSleepOn, setTabSleepOn] = useState(true)
+  const [restoreSessionOn, setRestoreSessionOn] = useState(false)
+  const [autoUpdateCheckOn, setAutoUpdateCheckOn] = useState(true)
+  const [silentInstallOn, setSilentInstallOn] = useState(false)
   const [defaultApp, setDefaultApp] = useState<DefaultAppStatus | null>(null)
   const [defaultAppBusy, setDefaultAppBusy] = useState(false)
   const [defaultAppFailed, setDefaultAppFailed] = useState(false)
   const [aiPrefs, setAiPrefs] = useState<AiPanelPrefs>(DEFAULT_AI_PANEL_PREFS)
   const [authorName, setAuthorName] = useState<AuthorNameSetting>({ value: '', fallback: '' })
+  const [legacyImportPrompt, setLegacyImportPrompt] = useState(true)
   const [channel, setChannel] = useState<'stable' | 'beta'>('stable')
   const [appVersion, setAppVersion] = useState('')
   const [githubStars, setGithubStars] = useState<number | null>(null)
@@ -1772,17 +1797,32 @@ export function SettingsModal({
     void window.aiOffice.getAutoSaveDefault?.().then((v) => {
       if (alive) setAutoSaveOn(v.on)
     })
+    void window.aiOffice.getTabSleepEnabled?.().then((on) => {
+      if (alive) setTabSleepOn(on)
+    })
+    void window.aiOffice.getRestoreLastSession?.().then((on) => {
+      if (alive) setRestoreSessionOn(on)
+    })
     void window.aiOffice.getDefaultAppStatus?.().then((st) => {
       if (alive) setDefaultApp(st)
     })
     void window.aiOffice.getAiPanelPrefs?.().then((prefs) => {
       if (alive) setAiPrefs(prefs)
     })
+    void window.aiOffice.getLegacyImportPrompt?.().then((v) => {
+      if (alive) setLegacyImportPrompt(v)
+    })
     void window.aiOffice.getAuthorName?.().then((v) => {
       if (alive) setAuthorName(v)
     })
     void window.aiOffice.getUpdateChannel?.().then((ch) => {
       if (alive) setChannel(ch)
+    })
+    void window.aiOffice.getAutoUpdateCheck?.().then((on) => {
+      if (alive) setAutoUpdateCheckOn(on)
+    })
+    void window.aiOffice.getSilentInstallUpdate?.().then((on) => {
+      if (alive) setSilentInstallOn(on)
     })
     void window.aiOffice.getAppVersion?.().then((v) => {
       if (alive && v) setAppVersion(v)
@@ -2093,6 +2133,25 @@ export function SettingsModal({
                 <div className="set-field">
                   <div className="set-field-text">
                     <div className="set-field-stack">
+                      <div className="set-field-label">{t('setLegacyImportPrompt')}</div>
+                      <div className="set-field-desc">{t('setLegacyImportPromptDesc')}</div>
+                    </div>
+                  </div>
+                  <button
+                    className="set-switch"
+                    role="switch"
+                    aria-checked={legacyImportPrompt}
+                    aria-label={t('setLegacyImportPrompt')}
+                    onClick={() => {
+                      const next = !legacyImportPrompt
+                      setLegacyImportPrompt(next)
+                      void window.aiOffice.setLegacyImportPrompt?.(next).then(setLegacyImportPrompt)
+                    }}
+                  />
+                </div>
+                <div className="set-field">
+                  <div className="set-field-text">
+                    <div className="set-field-stack">
                       <div className="set-field-label">{t('setAiSpellcheck')}</div>
                       <div className="set-field-desc">{t('setAiSpellcheckDesc')}</div>
                     </div>
@@ -2186,6 +2245,44 @@ export function SettingsModal({
                 <div className="set-field">
                   <div className="set-field-text">
                     <div className="set-field-stack">
+                      <div className="set-field-label">{t('setRestoreSession')}</div>
+                      <div className="set-field-desc">{t('setRestoreSessionDesc')}</div>
+                    </div>
+                  </div>
+                  <button
+                    className="set-switch"
+                    role="switch"
+                    aria-checked={restoreSessionOn}
+                    aria-label={t('setRestoreSession')}
+                    onClick={() => {
+                      const next = !restoreSessionOn
+                      setRestoreSessionOn(next)
+                      void window.aiOffice.setRestoreLastSession?.(next).catch(() => {})
+                    }}
+                  />
+                </div>
+                <div className="set-field">
+                  <div className="set-field-text">
+                    <div className="set-field-stack">
+                      <div className="set-field-label">{t('setTabSleep')}</div>
+                      <div className="set-field-desc">{t('setTabSleepDesc')}</div>
+                    </div>
+                  </div>
+                  <button
+                    className="set-switch"
+                    role="switch"
+                    aria-checked={tabSleepOn}
+                    aria-label={t('setTabSleep')}
+                    onClick={() => {
+                      const next = !tabSleepOn
+                      setTabSleepOn(next)
+                      void window.aiOffice.setTabSleepEnabled?.(next).catch(() => {})
+                    }}
+                  />
+                </div>
+                <div className="set-field">
+                  <div className="set-field-text">
+                    <div className="set-field-stack">
                       <div className="set-field-label">{t('setAnalytics')}</div>
                       <div className="set-field-desc">{t('setAnalyticsDesc')}</div>
                     </div>
@@ -2214,6 +2311,7 @@ export function SettingsModal({
             {section === 'integrations' && (
               <IntegrationsPane t={t} onStatus={(st) => onSkillUpdateDue?.(skillUpdateDue(st))} />
             )}
+            {section === 'skills' && <FoundSkills t={t} />}
             {section === 'about' && (
               <>
                 <h3 className="set-pane-title">{t('setSecAbout')}</h3>
@@ -2223,19 +2321,21 @@ export function SettingsModal({
                     <div className="set-field-text">
                       <label className="set-field-label">{t('setUpdateAvailableLabel')}</label>
                     </div>
-                    <button
-                      type="button"
-                      className="set-update-btn"
-                      onClick={() => void window.aiOffice.openUpdateDialog?.()}
-                    >
-                      {updateState.phase === 'downloading'
-                        ? t('setUpdateDownloading', {
-                            percent: Math.round(updateState.percent),
-                          })
-                        : updateState.phase === 'downloaded'
+                    {updateState.phase === 'downloading' ? (
+                      <span className="set-field-value">
+                        {t('setUpdateDownloading', { percent: Math.round(updateState.percent) })}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="set-update-btn"
+                        onClick={() => void window.aiOffice.openUpdateDialog?.()}
+                      >
+                        {updateState.phase === 'downloaded'
                           ? t('setUpdateRestart')
                           : t('setUpdateTo', { version: updateState.version })}
-                    </button>
+                      </button>
+                    )}
                   </div>
                 )}
                 <div className="set-field">
@@ -2254,6 +2354,44 @@ export function SettingsModal({
                       const next = v === 'beta' ? 'beta' : 'stable'
                       setChannel(next)
                       void window.aiOffice.setUpdateChannel(next)
+                    }}
+                  />
+                </div>
+                <div className="set-field">
+                  <div className="set-field-text">
+                    <div className="set-field-stack">
+                      <div className="set-field-label">{t('setAutoUpdateCheck')}</div>
+                      <div className="set-field-desc">{t('setAutoUpdateCheckDesc')}</div>
+                    </div>
+                  </div>
+                  <button
+                    className="set-switch"
+                    role="switch"
+                    aria-checked={autoUpdateCheckOn}
+                    aria-label={t('setAutoUpdateCheck')}
+                    onClick={() => {
+                      const next = !autoUpdateCheckOn
+                      setAutoUpdateCheckOn(next)
+                      void window.aiOffice.setAutoUpdateCheck?.(next).catch(() => {})
+                    }}
+                  />
+                </div>
+                <div className="set-field">
+                  <div className="set-field-text">
+                    <div className="set-field-stack">
+                      <div className="set-field-label">{t('setSilentInstall')}</div>
+                      <div className="set-field-desc">{t('setSilentInstallDesc')}</div>
+                    </div>
+                  </div>
+                  <button
+                    className="set-switch"
+                    role="switch"
+                    aria-checked={silentInstallOn}
+                    aria-label={t('setSilentInstall')}
+                    onClick={() => {
+                      const next = !silentInstallOn
+                      setSilentInstallOn(next)
+                      void window.aiOffice.setSilentInstallUpdate?.(next).catch(() => {})
                     }}
                   />
                 </div>

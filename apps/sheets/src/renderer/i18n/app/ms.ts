@@ -1,6 +1,21 @@
 import type { zh } from './zh'
 
 export const ms = {
+  // ── Withholding cells from the model ──
+  redactMenuLabel: 'Sembunyikan pilihan daripada AI',
+  redactDialogDesc:
+    'Kandungan yang dipilih kekal dalam dokumen dan fail; model hanya melihat placeholder di bawah. Beri nama supaya model tahu apa yang diwakili.',
+  redactDialogScope:
+    'Penyembunyian ini hanya untuk AI dalam aplikasi ini. CLI, alat MCP dan eksport tanpa antara muka membaca fail secara terus, jadi perkataan ini masih kelihatan kepada mereka.',
+  redactDialogPlaceholder: 'Nama placeholder, cth. telefon pelanggan',
+  redactCancel: 'Batal',
+  redactInsert: 'Sembunyikan',
+  redactEnable: 'Klik kanan pada teks yang dipilih untuk menyembunyikannya daripada model.',
+  redactNeedsSavedRow:
+    'Baris ini belum lagi dalam fail. Simpan dahulu, kemudian sembunyikan selnya.',
+  redactRecoveredFromNames:
+    'Aplikasi lain menulis semula fail ini dan membuang rekod apa yang disembunyikan. Sel yang disembunyikan itu dipulihkan daripada nama yang ada dalam buku kerja; menyimpan akan memulihkan rekod penuh.',
+
   appMergeWorkbooks: 'Gabung Buku Kerja',
   appMergeWorkbooksTip: 'Tambah helaian daripada fail Excel lain ke buku kerja ini',
   appMergeWorkbooksPicking: 'Pilih fail untuk digabungkan…',
@@ -103,8 +118,10 @@ export const ms = {
   appChartNoRepoint: 'Carta ini tidak menyokong penetapan semula julat datanya.',
   appKeepOneSeries: 'Kekalkan sekurang-kurangnya satu siri.',
   appNoCategoriesToSwitch: 'Tiada kategori untuk ditukar.',
-  appComboNoSelectData: 'Menukar sumber data carta kombo belum disokong.',
+  appSelectDataUnsupported: 'Menukar sumber data jenis carta ini tidak disokong.',
   appSeriesName: 'Nama Siri',
+  appSeriesType: 'Jenis siri',
+  appSecondaryAxis: 'Paksi sekunder',
   appValuesRange: 'Julat Nilai',
   appCategoriesRange: 'Julat Kategori',
   appKeepUnchanged: 'Kekalkan tanpa perubahan',
@@ -185,6 +202,12 @@ export const ms = {
   appInvalidGroupField: 'Medan pengumpulan tidak sah.',
   appInvalidPageField: 'Medan penapis laporan tidak sah.',
   appPivotPageItemMissing: 'Item penapis laporan "{item}" bukan ahli medan "{label}".',
+  appInvalidPivotBaseField:
+    'Medan asas "Tunjuk nilai sebagai" mesti berada dalam baris atau lajur.',
+  appPivotBaseFieldMissing: 'Mod "Tunjuk nilai sebagai" bagi medan nilai memerlukan medan asas.',
+  appPivotBaseFieldNotAxis:
+    'Medan asas "{label}" mesti berada dalam baris atau lajur jadual pangsi.',
+  appPivotBaseItemMissing: 'Item asas "{item}" bukan ahli medan "{label}".',
   appInvalidLabelFilterField: 'Medan penapis label tidak sah.',
   appInvalidValueFieldIndex: 'Indeks medan nilai {index} tidak sah.',
   appInvalidValueField: 'Medan nilai tidak sah.',
@@ -321,8 +344,7 @@ export const ms = {
   appPivotSheetNoMove: 'Helaian ini mengandungi Jadual Pangsi — pengalihan julat belum disokong.',
   appMergeOverTable:
     'Pilihan bertindih dengan jadual Excel — mencantumkan sel di dalam jadual belum disokong.',
-  appTableFilterNoEdit:
-    'Penapis helaian ini milik jadual Excel — pengeditannya belum boleh disimpan.',
+  appFilterToggleFailed: 'Penapis tidak digunakan — pilih dahulu julat yang mengandungi data anda.',
   appAutofillStreaming: 'AutoIsi ke kawasan yang masih distrim belum dibenarkan.',
   appDvNeedsIndexed:
     'Mengedit pengesahihan data memerlukan helaian ini diindeks sepenuhnya dahulu — cuba lagi sebentar.',
@@ -371,6 +393,9 @@ export const ms = {
   appTableNameUsed: 'Nama jadual "{name}" telah digunakan dalam sesi ini.',
   appTableNameInFile: 'Nama jadual "{name}" sudah digunakan oleh jadual dalam fail.',
   appTableOverlapsSession: 'Julat bertindih dengan jadual "{name}" yang dicipta dalam sesi ini.',
+  appTableOverlapsFile: 'Julat bertindih dengan jadual "{name}" dalam fail.',
+  appTableAlreadyInTable:
+    'Pilihan sudah berada dalam jadual "{name}" — tukar gaya daripada Reka Bentuk Jadual.',
   appTablesNeedFile: 'Buka fail XLSX dahulu — jadual ditulis ke dalam fail.',
   appTableSelectRange: 'Pilih julat data dahulu — pengepala pada baris pertamanya.',
   appTableCreated: 'Jadual dicipta — simpan dengan ⌘S.',
@@ -452,6 +477,7 @@ export const ms = {
   appGridlinesHidden: 'Garis grid disembunyikan.',
   appGridlinesShown: 'Garis grid ditunjukkan.',
   appShowingFormulas: 'Memaparkan formula — togol sekali lagi untuk nilai.',
+  appShowingFormulasActive: 'Memaparkan formula',
   appShowingValues: 'Memaparkan nilai terkira.',
   appTraceNoFormula: 'Surih Presedens: sel aktif tiada formula.',
   appTraceNoRefs: 'Surih Presedens: formula ini tiada rujukan sel.',
@@ -561,8 +587,6 @@ export const ms = {
   appSaveFailed: 'Tidak dapat menyimpan buku kerja.',
   appCfRuleUnsaveable:
     'Peraturan pemformatan bersyarat ini tidak boleh disimpan ke xlsx — gunakan jenis peraturan lain.',
-  appSaveErrX14Dv:
-    'Helaian ini mempunyai pengesahihan data lanjutan (x14); pengeditan peraturan pengesahihannya belum disokong.',
   appSaveErrMultiSelectList:
     'Pengesahihan senarai berbilang pilihan tidak boleh disimpan ke xlsx — padamkan peraturan itu sebelum menyimpan.',
   appSaveErrX14Cf:
@@ -689,6 +713,7 @@ export const ms = {
   appExportPdfTitle: 'Eksport sebagai PDF',
   appSaveTitle: 'Simpan (⌘S)',
   appSaveAs: 'Simpan Sebagai',
+  aiNameFile: 'Namakan dengan AI…',
   appUndo: 'Buat Asal',
   appRedo: 'Buat Semula',
   appUnsavedEditOne: '● {count} suntingan belum disimpan',
@@ -720,7 +745,6 @@ export const ms = {
   appLinkPlaceholder: 'https://example.com atau Sheet1!A1',
   appRemoveLink: 'Alih Keluar Pautan',
   appNotAvailableYet: 'Belum tersedia',
-  appComingSoon: 'Akan datang',
   appGroupChartLayouts: 'Bentangan carta',
   appAddChartElement: 'Tambah Elemen Carta',
   appAddChartElementTitle: 'Tajuk, label data, petunjuk',
@@ -1155,6 +1179,8 @@ export const ms = {
   appRefreshAll: 'Segar Semula Semua',
   appWorkbookNoPivot: 'Tiada Jadual Pangsi dalam buku kerja ini.',
   appRefreshAllTitle: 'Segar semula semua Jadual Pangsi',
+  appQueriesConnections: 'Pertanyaan & Sambungan',
+  appQueriesConnectionsTitle: 'Senaraikan pertanyaan dan sambungan data buku kerja',
   appErrorCheckingDetail: 'Imbas nilai ralat dalam helaian',
   appErrorsFound: '{count} ralat — di {cell}: {value}',
   appCheckingErrors: 'Mengimbas ralat di seluruh helaian…',
@@ -1189,6 +1215,7 @@ export const ms = {
   appGroupForecast: 'Ramalan',
   appWhatIfAnalysis: 'Analisis Bagaimana-Jika',
   appGoalSeek: 'Cari Matlamat',
+  appDataTable: 'Jadual Data',
   appWhatIfTitle: 'Cari input untuk nilai sasaran',
   appGoalSeekNeedsFormula: 'Sel mesti mengandungi formula.',
   appGoalSeekByCellNotNumber: 'Sel yang diubah mesti mengandungi nombor atau kosong.',
@@ -1271,6 +1298,21 @@ export const ms = {
   appOpenFileFirst: 'Buka fail dahulu',
   appNoPassword: 'Tiada kata laluan',
   appProtectWorkbook: 'Lindungi Buku Kerja',
+  appChangePassword: 'Tukar Kata Laluan',
+  appWorkbookPasswordChanged: 'Kata laluan buku kerja telah dikemas kini.',
+  appEncryptedOpenTitle: 'Buka buku kerja yang dilindungi kata laluan',
+  appEncryptedOpenCopy: 'Masukkan kata laluan untuk membuka kunci buku kerja ini.',
+  appEncryptedPasswordLabel: 'Kata laluan',
+  appEncryptedOpen: 'Buka',
+  appChangePasswordTitle: 'Tukar kata laluan buku kerja',
+  appChangePasswordCopy: 'Pilih kata laluan baharu dan sahkan di bawah.',
+  appNewPasswordLabel: 'Kata laluan baharu',
+  appConfirmPasswordLabel: 'Sahkan kata laluan baharu',
+  appPasswordsMismatch: 'Kata laluan tidak sepadan.',
+  appPasswordUpdateFailed: 'Tidak dapat mengemas kini kata laluan buku kerja.',
+  appPasswordUpdating: 'Mengemas kini…',
+  appUpdatePassword: 'Kemas Kini Kata Laluan',
+  appWorkbookNotPasswordProtected: 'Buku kerja ini tidak dilindungi oleh kata laluan pembukaan.',
   appAllowEditRanges: 'Benarkan Edit Julat',
   appGroupClipboard: 'Papan Klip',
   appPaste: 'Tampal',
@@ -1459,6 +1501,10 @@ export const ms = {
   appNotePicturesNone: 'Tiada nota dalam buku kerja ini memaparkan gambar.',
   appNotePictureUnavailable: 'Gambar ini tidak dapat dipaparkan.',
   appNotePicturesToggle: 'Gambar nota',
+  appNoteInsertPicture: 'Sisipkan gambar',
+  appNotePictureInserted: 'Gambar ditambah ke nota dalam {cell}. Simpan untuk menulisnya ke fail.',
+  appNotePictureRemoved: 'Gambar dibuang daripada nota dalam {cell}.',
+  appNotePictureRemove: 'Buang gambar',
   appCommentsPaneTitle: 'Komen',
   appThreadReply: 'Balas',
   appThreadReplyPlaceholder: 'Balas…',
@@ -1528,4 +1574,29 @@ export const ms = {
   appVisualFlipV: 'Balikkan Menegak',
   appVisualFlipH: 'Balikkan Mendatar',
   appCtxPasteVisual: 'Tampal Gambar atau Bentuk',
+
+  // ── Spelling check (F7 / Review ▸ Proofing) ──
+  appSpellTitle: 'Ejaan',
+  appSpellBtnDetail: 'Semak teks helaian (F7)',
+  appSpellToggle: 'Semak ejaan',
+  appSpellToggleTip:
+    'Mengaktifkan semakan ejaan (F7 dan butang Semak Semula); apabila dimatikan, kotak komen tidak lagi menampilkan garis bergelombang',
+  appSpellOn: 'Semakan ejaan diaktifkan.',
+  appSpellOff: 'Semakan ejaan dimatikan. Aktifkannya pada Semak Semula ▸ Semakan.',
+  appSpellRecheck: 'Semak semula',
+  appSpellNone: 'Tiada kesalahan ejaan yang disyaki ditemui.',
+  appSpellFindings: '{count} kesalahan disyaki. Klik baris untuk ke lokasinya.',
+  appSpellTruncated: 'Terlalu banyak sel teks; hanya bahagian awal disemak.',
+  appSpellColWord: 'Disyaki',
+  appSpellIgnore: 'Abaikan',
+  appSpellIgnoreAll: 'Abaikan semua',
+  appSpellLearn: 'Tambah ke kamus',
+  appSpellNoSuggestions: 'Tiada cadangan',
+  appSpellIgnoredAll: '"{word}" tidak akan ditandakan lagi dalam sesi ini.',
+  appSpellLearned: '"{word}" ditambah ke kamus.',
+  appSpellChanged: '{address} dibetulkan.',
+  appSpellChangeFailed: 'Gagal membetulkan {address}.',
+  appSpellUnavailable: 'Semakan ejaan tidak tersedia dalam tetingkap ini.',
+  appSpellReplaceAll: 'Ganti semua dengan "{suggestion}"',
+  appSpellChangedAll: '{count} sel dengan "{word}" telah dibetulkan.',
 } satisfies Record<keyof typeof zh, string>

@@ -1,10 +1,10 @@
 import type { AiPanelPrefs } from '@genoffice/ui'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
-import type { RenderSlide } from '@genoffice/pptx-render'
 import type { ProjectApi } from '@genoffice/project-store'
 import { installDropOpenBridge } from '@genoffice/electron-utils/drop-open'
 import type {
+  DeckChange,
   AddChartOp,
   AddElementOp,
   AiRunFailure,
@@ -89,6 +89,7 @@ import type {
   MasterEditFillOp,
   MasterEditStrokeOp,
   MasterDeleteElementOp,
+  MasterAddElementOp,
   ExportImagesOp,
   SavePictureOp,
   ExportPdfOp,
@@ -153,7 +154,7 @@ const api: SlidesApi = {
   consumeHeadlessExport: () => ipcRenderer.invoke('slides:consume-headless-export'),
   headlessExportDone: (result: { ok: boolean; error?: string }) =>
     ipcRenderer.send('slides:headless-export-done', result),
-  newBlank: (fitWidthPx) => ipcRenderer.invoke('slides:new-blank', fitWidthPx),
+  newBlank: (fitWidthPx, size) => ipcRenderer.invoke('slides:new-blank', fitWidthPx, size),
   landGeneratedPages: (
     pageMarkers: string[],
     fitWidthPx: number,
@@ -242,6 +243,7 @@ const api: SlidesApi = {
   masterEditStroke: (op: MasterEditStrokeOp) => ipcRenderer.invoke('slides:master-edit-stroke', op),
   masterDeleteElement: (op: MasterDeleteElementOp) =>
     ipcRenderer.invoke('slides:master-delete-element', op),
+  masterAddElement: (op: MasterAddElementOp) => ipcRenderer.invoke('slides:master-add-element', op),
   editFill: (op: EditFillOp) => ipcRenderer.invoke('slides:edit-fill', op),
   editStroke: (op: EditStrokeOp) => ipcRenderer.invoke('slides:edit-stroke', op),
   flipElements: (op: FlipElementOp) => ipcRenderer.invoke('slides:flip-elements', op),
@@ -361,13 +363,8 @@ const api: SlidesApi = {
     ipcRenderer.on('slides:history-changed', listener)
     return () => ipcRenderer.removeListener('slides:history-changed', listener)
   },
-  onDeckChanged: (
-    handler: (state: { slides: RenderSlide[]; size: { cx: number; cy: number } }) => void,
-  ) => {
-    const listener = (
-      _e: IpcRendererEvent,
-      state: { slides: RenderSlide[]; size: { cx: number; cy: number } },
-    ) => handler(state)
+  onDeckChanged: (handler: (state: DeckChange) => void) => {
+    const listener = (_e: IpcRendererEvent, state: DeckChange) => handler(state)
     ipcRenderer.on('slides:deck-changed', listener)
     return () => ipcRenderer.removeListener('slides:deck-changed', listener)
   },
@@ -398,6 +395,9 @@ const api: SlidesApi = {
     return () => ipcRenderer.removeListener('ai:settings-changed', listener)
   },
   openAiModelSettings: () => ipcRenderer.invoke('ai:open-model-settings'),
+  openSkillsSettings: () => ipcRenderer.invoke('ai:open-skills-settings'),
+  skillsList: () => ipcRenderer.invoke('ai:skills-list'),
+  skillText: (name: string) => ipcRenderer.invoke('ai:skill-text', name),
   aiStream: (request: AiStreamRequest) => ipcRenderer.invoke('ai:stream', request),
   aiStreamCancel: (requestId: string) => ipcRenderer.invoke('ai:stream-cancel', requestId),
   aiGskStatus: (withEmail?: boolean) => ipcRenderer.invoke('ai:gsk-status', withEmail),
@@ -476,7 +476,31 @@ const api: SlidesApi = {
   },
 }
 
+/**
+ * Model file naming: the transport half of `suggestFileName`.
+ *
+ * Inlined rather than imported — a preload entry must stay a single-file bundle,
+ * or the sandbox drops every global it exposed. The one `ai:` channel is
+ * registered app-wide by the shell (`registerAiNamingIpc`), not by this app, the
+ * same arrangement the `project:*` bridge below already depends on. A slides
+ * window running on its own has no such handler: the invoke rejects, and the
+ * shared client treats that as a declined naming, which leaves the deck with
+ * the name it already had.
+ *
+ * `content` crosses this bridge verbatim and the main process cannot see what
+ * this editor withheld, so what the caller hands over is exactly what the model
+ * sees. A caller that passed raw document text would undo its own redactions.
+ *
+ * The global is `aiNamingApi`, not `aiOffice`: `aiOffice` is the shell's home
+ * API, and a partial one in an editor window would shadow it there.
+ */
+const aiNamingApi = {
+  suggestFileName: (input: { content: string }) =>
+    ipcRenderer.invoke('ai:suggest-file-name', input),
+}
+
 contextBridge.exposeInMainWorld('slidesApi', api)
+contextBridge.exposeInMainWorld('aiNamingApi', aiNamingApi)
 
 // Chat attachment bridge: method names/signatures match the window.desktop attachment subset in docs, so the renderer's files-skill is copied over wholesale
 const filesApi: DesktopFilesApi = {

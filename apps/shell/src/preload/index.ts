@@ -34,9 +34,10 @@ import { INTEGRATIONS_CHANNELS } from '../shared/integrations-api'
 import type {
   IntegrationsApi,
   IntegrationsStatus,
+  LegacySweepResult,
   SkillInstallState,
 } from '../shared/integrations-api'
-import type { FoundSkill } from '../shared/found-skill'
+import type { FoundSkill, RecommendedSkill } from '../shared/found-skill'
 import type { TabsApi, TabSummary } from '../shared/tabs-api'
 import { TABS_CHANNELS } from '../shared/tabs-api'
 
@@ -62,6 +63,7 @@ const UI_LANGUAGES: readonly UiLanguage[] = [
   'hi',
   'zh-TW',
   'vi',
+  'tr',
 ]
 
 function isUiLanguage(value: unknown): value is UiLanguage {
@@ -107,6 +109,12 @@ function normalizeAuthorNameSetting(result: unknown): AuthorNameSetting {
     fallback: typeof r.fallback === 'string' ? r.fallback : '',
   }
 }
+
+// a Settings request (menu click, Cmd+,) can land before Home has subscribed
+const pendingOpenSettings: Array<{ section: string }> = []
+ipcRenderer.on(HOME_CHANNELS.openSettings, (_event, target: { section: string }) => {
+  if (ipcRenderer.listenerCount(HOME_CHANNELS.openSettings) === 1) pendingOpenSettings.push(target)
+})
 
 const homeApi: HomeApi = {
   async recents(query) {
@@ -165,6 +173,15 @@ const homeApi: HomeApi = {
   async kbList() {
     return ipcRenderer.invoke('kb:list')
   },
+  async skillsList() {
+    return ipcRenderer.invoke('ai:skills-list')
+  },
+  async skillText(name) {
+    return ipcRenderer.invoke('ai:skill-text', name)
+  },
+  async openSkillsSettings() {
+    await ipcRenderer.invoke('ai:open-skills-settings')
+  },
   async kbSearch(query) {
     return ipcRenderer.invoke('kb:search', query)
   },
@@ -173,6 +190,27 @@ const homeApi: HomeApi = {
   },
   async kbCreateDocument(request) {
     return ipcRenderer.invoke('kb:create-document', request)
+  },
+  async kbCliContext(sessionId) {
+    return ipcRenderer.invoke('kb:cli-context', sessionId)
+  },
+  async kbRunCli(sessionId, request) {
+    return ipcRenderer.invoke('kb:run-cli', { sessionId, ...request })
+  },
+  async pickAttachments() {
+    return ipcRenderer.invoke('files:pick')
+  },
+  async addAttachmentPaths(paths) {
+    return ipcRenderer.invoke('files:add', paths)
+  },
+  async addPastedImage(data, ext) {
+    return ipcRenderer.invoke('files:add-pasted-image', data, ext)
+  },
+  async readAttachment(path, offset, maxChars) {
+    return ipcRenderer.invoke('files:read', path, offset, maxChars)
+  },
+  async readAttachmentImage(path) {
+    return ipcRenderer.invoke('files:read-image', path)
   },
   async aiGetSettings() {
     return ipcRenderer.invoke('ai:get-settings')
@@ -303,6 +341,22 @@ const homeApi: HomeApi = {
     if (channel !== 'stable' && channel !== 'beta') throw new Error('Invalid update channel.')
     await ipcRenderer.invoke(HOME_CHANNELS.setUpdateChannel, channel)
   },
+  async getAutoUpdateCheck() {
+    const result: unknown = await ipcRenderer.invoke(HOME_CHANNELS.getAutoUpdateCheck)
+    return result !== false
+  },
+  async setAutoUpdateCheck(on) {
+    if (typeof on !== 'boolean') throw new Error('Invalid update check setting.')
+    await ipcRenderer.invoke(HOME_CHANNELS.setAutoUpdateCheck, on)
+  },
+  async getSilentInstallUpdate() {
+    const result: unknown = await ipcRenderer.invoke(HOME_CHANNELS.getSilentInstallUpdate)
+    return result === true
+  },
+  async setSilentInstallUpdate(on) {
+    if (typeof on !== 'boolean') throw new Error('Invalid silent install setting.')
+    await ipcRenderer.invoke(HOME_CHANNELS.setSilentInstallUpdate, on)
+  },
   async accountStatus() {
     const result: unknown = await ipcRenderer.invoke(HOME_CHANNELS.accountStatus)
     return (result ?? { loggedIn: false }) as AccountStatus
@@ -314,6 +368,7 @@ const homeApi: HomeApi = {
   onOpenSettings(handler) {
     const listener = (_event: IpcRendererEvent, target: { section: string }) => handler(target)
     ipcRenderer.on(HOME_CHANNELS.openSettings, listener)
+    for (const target of pendingOpenSettings.splice(0)) handler(target)
     return () => ipcRenderer.removeListener(HOME_CHANNELS.openSettings, listener)
   },
   onAccountLogin(handler) {
@@ -377,6 +432,22 @@ const homeApi: HomeApi = {
       on: r?.on === true,
       updatedAt: typeof r?.updatedAt === 'number' ? r.updatedAt : 0,
     }
+  },
+  async getTabSleepEnabled() {
+    const result: unknown = await ipcRenderer.invoke(HOME_CHANNELS.getTabSleepEnabled)
+    return result !== false
+  },
+  async setTabSleepEnabled(on) {
+    if (typeof on !== 'boolean') throw new Error('Invalid tab sleep setting.')
+    await ipcRenderer.invoke(HOME_CHANNELS.setTabSleepEnabled, on)
+  },
+  async getRestoreLastSession() {
+    const result: unknown = await ipcRenderer.invoke(HOME_CHANNELS.getRestoreLastSession)
+    return result === true
+  },
+  async setRestoreLastSession(on) {
+    if (typeof on !== 'boolean') throw new Error('Invalid restore session setting.')
+    await ipcRenderer.invoke(HOME_CHANNELS.setRestoreLastSession, on)
   },
   async setAutoSaveDefault(on) {
     if (typeof on !== 'boolean') throw new Error('Invalid AutoSave default.')
@@ -455,6 +526,12 @@ const homeApi: HomeApi = {
     if (typeof enabled !== 'boolean') throw new Error('Invalid analytics consent.')
     const result: unknown = await ipcRenderer.invoke(HOME_CHANNELS.setAnalyticsEnabled, enabled)
     return result === true
+  },
+  async getLegacyImportPrompt() {
+    return (await ipcRenderer.invoke(HOME_CHANNELS.getLegacyImportPrompt)) !== false
+  },
+  async setLegacyImportPrompt(prompt) {
+    return (await ipcRenderer.invoke(HOME_CHANNELS.setLegacyImportPrompt, prompt)) !== false
   },
   async getAuthorName() {
     return normalizeAuthorNameSetting(await ipcRenderer.invoke(HOME_CHANNELS.getAuthorName))
@@ -624,6 +701,24 @@ function asCloudProjectsSnapshot(result: unknown): CloudProjectsSnapshot | null 
 
 contextBridge.exposeInMainWorld('aiOffice', homeApi)
 
+/**
+ * Model file naming.
+ *
+ * The same channel the editor apps expose under this name, so the shared
+ * client (`@genoffice/ui`) finds one bridge wherever it runs.
+ *
+ * A global of its own rather than part of `aiOffice`: `aiOffice` is the
+ * shell's home API, and an editor window that reused the name would shadow it
+ * there — `window.aiOffice.setTheme` would vanish with it.
+ */
+const aiNamingApi = {
+  suggestFileName(input: { content: string }) {
+    return ipcRenderer.invoke('ai:suggest-file-name', input)
+  },
+}
+
+contextBridge.exposeInMainWorld('aiNamingApi', aiNamingApi)
+
 // The same project:* channels the editor preloads use; the home screen's
 // knowledge-base ask panel keeps its thread through them. The handlers are
 // registered once by the docs main process in shell mode (registerProjectIpc).
@@ -654,6 +749,11 @@ const integrationsApi: IntegrationsApi = {
       agentId,
     )) as SkillInstallState
   },
+  async sweepLegacySkillCopies() {
+    return (await ipcRenderer.invoke(
+      INTEGRATIONS_CHANNELS.sweepLegacySkillCopies,
+    )) as LegacySweepResult
+  },
   async pickSkillDir(title) {
     const r: unknown = await ipcRenderer.invoke(INTEGRATIONS_CHANNELS.pickSkillDir, title)
     return typeof r === 'string' ? r : null
@@ -671,8 +771,27 @@ const integrationsApi: IntegrationsApi = {
   async skillBody(path) {
     return (await ipcRenderer.invoke(INTEGRATIONS_CHANNELS.skillBody, path)) as string
   },
-  async importSkill(path) {
-    return (await ipcRenderer.invoke(INTEGRATIONS_CHANNELS.importSkill, path)) as FoundSkill
+  async importSkillFolder(title) {
+    const r: unknown = await ipcRenderer.invoke(INTEGRATIONS_CHANNELS.importSkillFolder, title)
+    return (r as FoundSkill | null) ?? null
+  },
+  async importSkillZip(title) {
+    const r: unknown = await ipcRenderer.invoke(INTEGRATIONS_CHANNELS.importSkillZip, title)
+    return (r as FoundSkill | null) ?? null
+  },
+  async listRecommendedSkills() {
+    return (await ipcRenderer.invoke(
+      INTEGRATIONS_CHANNELS.listRecommendedSkills,
+    )) as RecommendedSkill[]
+  },
+  async removeSkill(name) {
+    await ipcRenderer.invoke(INTEGRATIONS_CHANNELS.removeSkill, name)
+  },
+  async installRecommendedSkill(name) {
+    return (await ipcRenderer.invoke(
+      INTEGRATIONS_CHANNELS.installRecommendedSkill,
+      name,
+    )) as FoundSkill
   },
 }
 contextBridge.exposeInMainWorld('aiOfficeIntegrations', integrationsApi)

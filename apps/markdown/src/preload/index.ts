@@ -23,7 +23,10 @@ const api: MarkdownApi = {
     ipcRenderer.invoke(MARKDOWN_CHANNELS.rememberWikiFragment, path, fragment),
   takeWikiFragment: (path) => ipcRenderer.invoke(MARKDOWN_CHANNELS.takeWikiFragment, path),
   listWikiNotes: () => ipcRenderer.invoke(MARKDOWN_CHANNELS.listWikiNotes),
+  createWikiNote: (request) => ipcRenderer.invoke(MARKDOWN_CHANNELS.createWikiNote, request),
+  wikiHeads: (request) => ipcRenderer.invoke(MARKDOWN_CHANNELS.wikiHeads, request),
   wikiBacklinks: (path: string) => ipcRenderer.invoke(MARKDOWN_CHANNELS.wikiBacklinks, path),
+  wikiTags: () => ipcRenderer.invoke(MARKDOWN_CHANNELS.wikiTags),
   wikiGraph: () => ipcRenderer.invoke(MARKDOWN_CHANNELS.wikiGraph),
   consumeHeadlessExport: () => ipcRenderer.invoke(MARKDOWN_CHANNELS.consumeHeadlessExport),
   headlessExportDone: (result: { ok: boolean; error?: string }) =>
@@ -54,6 +57,12 @@ const api: MarkdownApi = {
     ipcRenderer.on(MARKDOWN_CHANNELS.fileRenamed, listener)
     return () => ipcRenderer.removeListener(MARKDOWN_CHANNELS.fileRenamed, listener)
   },
+  onFileChangedOnDisk: (handler) => {
+    const listener = (_e: Electron.IpcRendererEvent, path: string) => handler(path)
+    ipcRenderer.on(MARKDOWN_CHANNELS.fileChangedOnDisk, listener)
+    return () => ipcRenderer.removeListener(MARKDOWN_CHANNELS.fileChangedOnDisk, listener)
+  },
+  ackFileChangedOnDisk: () => ipcRenderer.send(MARKDOWN_CHANNELS.ackFileChangedOnDisk),
   pickImage: () => ipcRenderer.invoke(MARKDOWN_CHANNELS.pickImage),
   saveImage: (data) => ipcRenderer.invoke(MARKDOWN_CHANNELS.saveImage, data),
   readImage: (src) => ipcRenderer.invoke(MARKDOWN_CHANNELS.readImage, src),
@@ -139,6 +148,9 @@ const api: MarkdownApi = {
     return () => ipcRenderer.removeListener(AI_CHANNELS.settingsChanged, listener)
   },
   openAiModelSettings: () => ipcRenderer.invoke(AI_CHANNELS.openModelSettings),
+  openSkillsSettings: () => ipcRenderer.invoke('ai:open-skills-settings'),
+  skillsList: () => ipcRenderer.invoke('ai:skills-list'),
+  skillText: (name: string) => ipcRenderer.invoke('ai:skill-text', name),
   aiGskStatus: () => ipcRenderer.invoke(AI_CHANNELS.gskStatus),
   aiStream: (request) => ipcRenderer.invoke(AI_CHANNELS.stream, request),
   aiStreamCancel: (requestId) => ipcRenderer.invoke(AI_CHANNELS.streamCancel, requestId),
@@ -162,7 +174,28 @@ const projectApi: Pick<ProjectApi, 'resolveChat' | 'appendChat' | 'loadChat' | '
   rebindChat: (args) => ipcRenderer.invoke('project:rebindChat', args),
 }
 
+/**
+ * Model file naming: the transport half of `suggestFileName`.
+ *
+ * Inlined rather than imported — a preload entry must stay a single-file bundle,
+ * or the sandbox drops every global it exposed. The one `ai:` channel is
+ * registered app-wide by the shell rather than by this app, the same arrangement
+ * the `project:*` bridge below already depends on.
+ *
+ * `content` crosses this bridge verbatim and the main process cannot see what
+ * this editor withheld, so what the caller hands over is exactly what the model
+ * sees. A caller that passed raw document text would undo its own redactions.
+ *
+ * The global is `aiNamingApi`, not `aiOffice`: `aiOffice` is the shell's home
+ * API, and a partial one in an editor window would shadow it there.
+ */
+const aiNamingApi = {
+  suggestFileName: (input: { content: string }) =>
+    ipcRenderer.invoke('ai:suggest-file-name', input),
+}
+
 contextBridge.exposeInMainWorld('markdownApi', api)
+contextBridge.exposeInMainWorld('aiNamingApi', aiNamingApi)
 contextBridge.exposeInMainWorld('projectApi', projectApi)
 
 // open documents dragged from the OS onto this tab as a new shell tab

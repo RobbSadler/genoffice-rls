@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import {
   hoistPaperClamp,
   hoistSlotOf,
+  hoistWindowCss,
   stripLeadingTranslate,
   pinnedCloneCss,
 } from '../src/renderer/components/PaginationPreview'
@@ -115,6 +116,22 @@ describe('hoistSlotOf', () => {
     expect(hoistSlotOf(box('position:absolute;right:0px;top:2px'))).toBe('right')
     expect(hoistSlotOf(box('position:absolute;right:20px;top:2px'))).toBeNull()
   })
+
+  it('reads the slot off the owning .box-rotator when the box is wrapped', () => {
+    // the chrome rotator owns the float slot style; the box itself carries no
+    // left/clamp/right any more, so the carrier lookup decides the slot
+    const rotator = document.createElement('div')
+    rotator.className = 'box-rotator'
+    rotator.setAttribute('style', 'position:absolute;left:clamp(0px, 12.5px, 200px);top:3px')
+    const inner = document.createElement('span')
+    inner.className = 'doc-textbox'
+    inner.setAttribute('style', 'background-color:#fff;width:189px;height:40px')
+    rotator.appendChild(inner)
+    expect(hoistSlotOf({ el: inner })).toBe('left')
+
+    // a box without a rotator parent still classifies from its own style
+    expect(hoistSlotOf(box('position:absolute;left:12.5px;top:3px'))).toBe('left')
+  })
 })
 
 describe('hoistPaperClamp', () => {
@@ -156,5 +173,21 @@ describe('stripLeadingTranslate', () => {
     ).toBe('rotate(90deg) scaleX(-1)')
     expect(stripLeadingTranslate('translate(96.0px, 0.0px)')).toBe('')
     expect(stripLeadingTranslate('rotate(90deg)')).toBe('rotate(90deg)')
+  })
+})
+
+describe('hoistWindowCss (prod corpus 20261020 sample 026, regioned page)', () => {
+  it("hides a hoisted wrapper's boxes in the body windows that do not own its anchor", () => {
+    const css = hoistWindowCss(new Map([[1, new Set(['1040.2'])]]))
+    expect(css).toContain(
+      '.pv-page[data-pv-page="1"] .pv-content[data-pv-win]:not([data-pv-win="1040.2"]) [data-pv-hoist=\'1\'][data-pin-win="1040.2"] > .doc-textbox',
+    )
+    expect(css).toContain('> .doc-img-wrap{visibility:hidden;}')
+    // the stray anchor line of the wrapper is never targeted
+    expect(css).not.toMatch(/data-pin-win="1040\.2"\]\{/)
+  })
+
+  it('emits nothing without hoisted wrappers', () => {
+    expect(hoistWindowCss(new Map())).toBe('')
   })
 })

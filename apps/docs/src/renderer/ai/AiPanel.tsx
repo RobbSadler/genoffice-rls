@@ -1,8 +1,11 @@
+import { showToast } from '../components/toast-bus'
 import {
   aiPanelWidthAtPointer,
   AiPanelSideButton,
   AiModelPicker,
   type AiModelPickerBridge,
+  AiSkillChips,
+  AiSkillsMenu,
   AiQueueStrip,
   AI_QUEUE_LABELS,
   AiUsageChip,
@@ -10,12 +13,14 @@ import {
   type AiTokenUsageView,
   useChatRunQueue,
 } from '@genoffice/ui'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { aiRevisionAuthor } from './revision-author'
 import type { Editor } from '@tiptap/core'
 import type { Block } from '@genoffice/docx-engine'
 import {
   AgentLoop,
   composeSkills,
+  withAttachedSkills,
   createKnowledgeBaseSkill,
   streamText,
   type AgentImage,
@@ -40,6 +45,7 @@ import type { AiPageSetupAccess } from './page-setup'
 import type { AiNotesAccess } from './note-ops'
 import { createDocsSkill } from './docs-skill'
 import { MindMapCard } from './MindMapCard'
+import { insertPictureAtSelection } from '../editor/insert-picture'
 import {
   buildDocWriterRequest,
   countFragmentBlocks,
@@ -57,7 +63,11 @@ import {
   type DocsEditQueueItem,
 } from './edit-queue'
 import { setInactiveSelectionShown } from '../editor/inactive-selection'
-import { applyRevisionsBy } from '../editor/revisions'
+import type { Node as ProseNode } from '@tiptap/pm/model'
+import type { RevisionRange } from '../editor/revisions'
+import type { ReviewEntry } from '../editor/revision-filters'
+import { KIND_LABEL } from '../components/ReviewingPane'
+import { STORY_LABEL } from '../editor/story-revisions'
 import { DOCS_CONTINUE_INSTRUCTION } from './continuation'
 import { waitForFullContent } from '../phased-content'
 import { currentDocGeneration } from '../file-actions'
@@ -72,7 +82,6 @@ import { GensparkMark } from '../components/icons'
 import sendEnterOn from '../assets/send-enter-on.png'
 import sendEnterOff from '../assets/send-enter-off.png'
 import sendStop from '../assets/send-stop.png'
-import attachIcon from '../assets/attach-icon.png'
 import filePdfIcon from '../assets/file-pdf.png'
 import fileWordIcon from '../assets/file-word.png'
 import fileExcelIcon from '../assets/file-excel.png'
@@ -99,6 +108,51 @@ const TOOL_OUTPUT_MAX_CHARS = 2000
 
 /** progress chip refresh while a write streams */
 const CHIP_UPDATE_MS = 400
+
+/** Widest a mind map picture is placed into the document; narrower maps keep
+ *  their layout size (the markdown app's diagram fallback width). */
+const MIND_MAP_PICTURE_MAX_WIDTH_PX = 620
+
+/** Rasterize the baked mind-map SVG at 2x and insert it as a picture. */
+async function insertSvgAsPng(
+  editor: Editor,
+  svg: string,
+  size: { width: number; height: number },
+  label: string,
+): Promise<void> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const blobUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }))
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(blobUrl)
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.round(size.width * 2)
+      canvas.height = Math.round(size.height * 2)
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        reject(new Error('canvas 2d context unavailable'))
+        return
+      }
+      ctx.scale(2, 2)
+      ctx.drawImage(img, 0, 0)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(blobUrl)
+      reject(new Error('the mind map SVG could not be rasterized'))
+    }
+    img.src = blobUrl
+  })
+  const scale = Math.min(1, MIND_MAP_PICTURE_MAX_WIDTH_PX / Math.max(1, size.width))
+  insertPictureAtSelection(editor, {
+    dataUrl,
+    base64: dataUrl.slice(dataUrl.indexOf(',') + 1),
+    mime: 'image/png',
+    widthPx: Math.max(1, Math.round(size.width * scale)),
+    heightPx: Math.max(1, Math.round(size.height * scale)),
+    label,
+  })
+}
 
 /** Cap on tool args/output persisted in the transcript (the store layer has another 16k truncation fallback) */
 const PERSIST_TOOL_FIELD_MAX = 16_000
@@ -130,6 +184,8 @@ interface ChatEntry {
   snapshot?: PmNode
   /** attachments consumed from the composer by this user message (read-only echo chips) */
   attachments?: AttachmentMeta[]
+  /** skills the user attached to this message from the composer menu */
+  skills?: string[]
   /** the selection this user message targeted, frozen at send */
   scope?: AiScopeQuoteData
   /** tokens the provider billed for this reply, summed across its turns (absent when unreported) */
@@ -179,7 +235,6 @@ function loadPanelWidth(): number {
 }
 
 /** persisted UI preference: highlight AI edits in yellow and ask for confirmation */
-const TRACK_CHANGES_KEY = 'ai-docs-track-changes'
 
 /** Clipboard bitmap MIME → attachment extension (corresponds to ATTACHMENT_IMAGE_EXTS) */
 const PASTE_MIME_EXT: Record<string, string> = {
@@ -307,8 +362,7 @@ function SentAttachments({
   )
 }
 
-/** author name on AI-generated tracked revisions (accept/reject via Review) */
-export const AI_REVISION_AUTHOR = 'AI Assistant'
+export { aiRevisionAuthor }
 
 interface AiPanelProps {
   editor: Editor
@@ -349,6 +403,57 @@ interface AiPanelProps {
   docExtras?: AiDocExtras
   /** footnote / endnote lists for insert_footnote, insert_endnote, delete_note, read_notes */
   notesAccess?: AiNotesAccess
+  /** the document's Track Changes state (shared with the Review ribbon and status bar) */
+  trackChanges?: boolean
+  /** protection (read-only or forced trackedChanges): the pill and the accept / reject bar cannot act */
+  trackChangesLocked?: boolean
+  onTrackChangesToggle?: () => void
+  /** pending revisions in the document, drives the accept-all / reject-all bar */
+  revisionCount?: number
+  onRevisions?: (action: 'accept' | 'reject') => void
+  /** the pending revisions one by one (Reviewing Pane data) for the expandable list under the bar */
+  reviewEntries?: ReviewEntry[]
+  activeReviewIndex?: number
+  onRevisionSelect?: (rev: RevisionRange) => void
+  onRevisionRange?: (action: 'accept' | 'reject', rev: RevisionRange) => void
+}
+
+const EMPTY_REVIEW: ReviewEntry[] = []
+const EMPTY_NUMS: number[] = []
+
+/** 1-based paragraph number (every textblock in document order, table cells included) per entry */
+function paragraphNumbers(doc: ProseNode, entries: ReviewEntry[]): number[] {
+  const starts: number[] = []
+  doc.descendants((node, pos) => {
+    if (node.isTextblock) starts.push(pos)
+    return !node.isTextblock
+  })
+  return entries.map((e) => {
+    let lo = 0
+    let hi = starts.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (starts[mid] <= e.rev.from) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  })
+}
+
+/** dot colour of a list row: insertions green, deletions red, the rest neutral */
+const REVISION_TONE: Partial<Record<RevisionRange['kind'], 'ins' | 'del' | 'fmt'>> = {
+  ins: 'ins',
+  moveTo: 'ins',
+  rowIns: 'ins',
+  cellIns: 'ins',
+  blockIns: 'ins',
+  paraMarkIns: 'ins',
+  del: 'del',
+  moveFrom: 'del',
+  rowDel: 'del',
+  cellDel: 'del',
+  blockDel: 'del',
+  paraMarkDel: 'del',
 }
 
 const MODEL_BRIDGE: AiModelPickerBridge = {
@@ -382,6 +487,15 @@ export function AiPanel({
   pageSetupAccess,
   docExtras,
   notesAccess,
+  trackChanges = false,
+  trackChangesLocked = false,
+  onTrackChangesToggle,
+  revisionCount = 0,
+  onRevisions,
+  reviewEntries = EMPTY_REVIEW,
+  activeReviewIndex = -1,
+  onRevisionSelect,
+  onRevisionRange,
 }: AiPanelProps) {
   const { t, lang } = useI18n()
   // Panel chrome follows the UI language; message text follows its own content (dir=auto below)
@@ -425,11 +539,15 @@ export function AiPanel({
   const writerEpochRef = useRef(0)
   /** Past conversation restored from JSONL (read-only transcript, not fed to the model) */
   const [historicChat, setHistoricChat] = useState<ChatEntry[]>([])
-  const [trackChanges, setTrackChanges] = useState(
-    () => localStorage.getItem(TRACK_CHANGES_KEY) === '1',
-  )
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const [revisionListOpen, setRevisionListOpen] = useState(false)
+  const revisionParas = useMemo(
+    () =>
+      revisionListOpen && editor ? paragraphNumbers(editor.state.doc, reviewEntries) : EMPTY_NUMS,
+    [revisionListOpen, editor, reviewEntries],
+  )
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([])
+  const [attachedSkills, setAttachedSkills] = useState<string[]>([])
   const [attachNotice, setAttachNotice] = useState<string | null>(null)
   /** data-URL previews for image attachments, keyed by path (Genspark composer thumbnails) */
   const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({})
@@ -568,6 +686,8 @@ export function AiPanel({
   numIdFallbackRef.current = numIdFallback
   const attachmentsRef = useRef(attachments)
   attachmentsRef.current = attachments
+  const attachedSkillsRef = useRef(attachedSkills)
+  attachedSkillsRef.current = attachedSkills
   /** attachments consumed by the most recent send — retry resends the same set */
   const lastAttachmentsRef = useRef<AttachmentMeta[]>([])
   /** the scope quote of the last send, so a retry reuses it instead of re-reading the live selection */
@@ -842,7 +962,7 @@ export function AiPanel({
         createDocsSkill(
           () => editorRef.current,
           numIds,
-          () => (trackChangesRef.current ? { author: AI_REVISION_AUTHOR } : undefined),
+          () => (trackChangesRef.current ? { author: aiRevisionAuthor() } : undefined),
           () => commentsAccessRef.current,
           () => hfAccessRef.current,
           () => imageGenerationAvailable(settingsRef.current, gskLoggedInRef.current),
@@ -1081,7 +1201,7 @@ export function AiPanel({
     stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
   }
 
-  const run = () => runWith(input.trim())
+  const run = () => runWith(input.trim(), input.trim(), undefined, undefined, true)
 
   /** Image attachments are read as base64 and go multimodal with this user message (≤5MB per image, max 20) */
   const MAX_IMAGES_PER_MESSAGE = 20
@@ -1113,6 +1233,8 @@ export function AiPanel({
     attachmentsOverride?: AttachmentMeta[],
     /** null = a retry that had no scope; undefined = capture the live selection */
     retryScope?: AiScopeQuoteData | null,
+    /** only the composer's own send takes the attached skills along */
+    attachSkills = false,
   ) => {
     const loop = loopRef.current
     if (!instruction || !loop || loop.busy || pendingSendRef.current) return
@@ -1129,6 +1251,9 @@ export function AiPanel({
       setAttachments([])
     }
     lastAttachmentsRef.current = sentAtts
+    // skills ride with this one message only: the chips clear like attachments do
+    const sentSkills = attachSkills ? attachedSkillsRef.current : []
+    if (sentSkills.length > 0) setAttachedSkills([])
     // the queue batch and the continue action carry their own display text: no selection quote
     const scope =
       retryScope !== undefined
@@ -1152,6 +1277,7 @@ export function AiPanel({
           role: 'user',
           text: displayInstruction,
           ...(sentAtts.length > 0 ? { attachments: sentAtts } : {}),
+          ...(sentSkills.length > 0 ? { skills: sentSkills } : {}),
           ...(scope ? { scope } : {}),
         },
         { role: 'assistant', text: '', streaming: true },
@@ -1188,9 +1314,34 @@ export function AiPanel({
           setBusy(false)
           return
         }
-        return loop.run(instruction, images)
+        return loop.run(await withSkillBodies(instruction, sentSkills), images)
       })
   }
+
+  /** the attached skills' full text in front of the request; a skill that vanished is skipped */
+  const withSkillBodies = async (instruction: string, names: readonly string[]) => {
+    if (names.length === 0) return instruction
+    const bodies = await Promise.all(
+      names.map(async (name) => {
+        try {
+          return { name, body: await window.desktop.skillText(name) }
+        } catch {
+          return null
+        }
+      }),
+    )
+    return withAttachedSkills(
+      instruction,
+      bodies.filter((b): b is { name: string; body: string } => b !== null),
+    )
+  }
+
+  const listSkillsForMenu = async () =>
+    (await window.desktop.skillsList()).map(({ name, description }) => ({ name, description }))
+  const toggleSkill = (name: string) =>
+    setAttachedSkills((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+    )
 
   const cancel = () => {
     msgQueue.hold()
@@ -1261,6 +1412,7 @@ export function AiPanel({
     // file context (availableAttachments merges sent + live). The typed
     // draft itself is kept — only staged files are dropped.
     setAttachments([])
+    setAttachedSkills([])
     setAttachNotice(null)
     sentAttachmentsRef.current = []
     inputRef.current?.focus()
@@ -1316,17 +1468,9 @@ export function AiPanel({
   const removeAttachment = (path: string) =>
     setAttachments((prev) => prev.filter((a) => a.path !== path))
 
-  const acceptChanges = () => {
-    applyRevisionsBy(editorRef.current, AI_REVISION_AUTHOR, 'accept')
-    clearAiHighlights()
-  }
-
   const toggleTrackChanges = () => {
-    const next = !trackChanges
-    setTrackChanges(next)
-    localStorage.setItem(TRACK_CHANGES_KEY, next ? '1' : '0')
-    // switching off keeps nothing pending: accept whatever is still highlighted
-    if (!next) acceptChanges()
+    if (trackChangesLocked) return
+    onTrackChangesToggle?.()
   }
 
   const rollback = (entryIdx: number, snapshot: PmNode) => {
@@ -1464,6 +1608,9 @@ export function AiPanel({
                 {entry.role === 'user' && entry.attachments && entry.attachments.length > 0 && (
                   <SentAttachments atts={entry.attachments} previews={attachmentPreviews} />
                 )}
+                {entry.role === 'user' && entry.skills && (
+                  <AiSkillChips lang={lang} names={entry.skills} />
+                )}
                 {entry.tools && entry.tools.length > 0 && <ToolChipList tools={entry.tools} />}
                 {entry.text && (
                   <div dir="auto">
@@ -1531,6 +1678,9 @@ export function AiPanel({
               {entry.role === 'user' && entry.attachments && entry.attachments.length > 0 && (
                 <SentAttachments atts={entry.attachments} previews={attachmentPreviews} />
               )}
+              {entry.role === 'user' && entry.skills && (
+                <AiSkillChips lang={lang} names={entry.skills} />
+              )}
               {entry.role === 'assistant' && !entry.text && entry.streaming ? (
                 <span className="ai-typing-row">
                   <AiTypingIndicator
@@ -1558,6 +1708,13 @@ export function AiPanel({
                     inputRef.current?.focus()
                   }}
                   onJumpBlock={(index) => navigateToBlock(editorRef.current, index)}
+                  onInsert={(svg, size) => {
+                    const editor = editorRef.current
+                    if (!editor || !entry.mindmap) return
+                    insertSvgAsPng(editor, svg, size, t('aiMindMapTitle')).catch((err: unknown) =>
+                      showToast(err instanceof Error ? err.message : String(err), 'error'),
+                    )
+                  }}
                 />
               )}
               {entry.error && (
@@ -1673,6 +1830,91 @@ export function AiPanel({
             </div>
           </div>
         )}
+        {revisionCount > 0 && (
+          <div className="ai-revision-bar" role="group" aria-label={t('aiRevisionBarTitle')}>
+            <button
+              type="button"
+              className={`ai-revision-count${revisionListOpen ? ' open' : ''}`}
+              disabled={reviewEntries.length === 0}
+              aria-expanded={revisionListOpen && reviewEntries.length > 0}
+              onClick={() => setRevisionListOpen((v) => !v)}
+            >
+              {t('aiRevisionCount', { count: revisionCount })}
+              {reviewEntries.length > 0 && <span className="ai-revision-chevron" aria-hidden />}
+            </button>
+            <button
+              type="button"
+              className="ai-queue-discard"
+              disabled={trackChangesLocked}
+              onClick={() => onRevisions?.('reject')}
+            >
+              {t('aiRevisionRejectAll')}
+            </button>
+            <button
+              type="button"
+              className="ai-queue-send"
+              disabled={trackChangesLocked}
+              onClick={() => onRevisions?.('accept')}
+            >
+              {t('aiRevisionAcceptAll')}
+            </button>
+            {revisionListOpen && reviewEntries.length > 0 && (
+              <div className="ai-revision-list">
+                {reviewEntries.map((e, i) => {
+                  const kind = e.rev.kind
+                  const tone = REVISION_TONE[kind] ?? 'fmt'
+                  const para = revisionParas[i] ?? 0
+                  return (
+                    <div
+                      key={e.rev.story?.id ?? `${e.rev.from}-${kind}-${e.rev.author}`}
+                      className={`ai-revision-row${e.index === activeReviewIndex ? ' active' : ''}`}
+                      onClick={() => onRevisionSelect?.(e.rev)}
+                    >
+                      <div className="ai-revision-row-head">
+                        <span className={`ai-revision-dot ${tone}`} aria-hidden />
+                        <b>{t(KIND_LABEL[kind])}</b>
+                        {e.rev.story ? (
+                          <span> · {t(STORY_LABEL[e.rev.story.kind])}</span>
+                        ) : (
+                          para > 0 && <span> · {t('aiRevisionPara', { n: para })}</span>
+                        )}
+                      </div>
+                      {e.excerpt && (
+                        <div className={`ai-revision-row-text${tone === 'del' ? ' del' : ''}`}>
+                          {e.excerpt}
+                        </div>
+                      )}
+                      <div className="ai-revision-row-actions">
+                        <button
+                          type="button"
+                          className="ai-revision-reject"
+                          disabled={trackChangesLocked}
+                          onClick={(ev) => {
+                            ev.stopPropagation()
+                            onRevisionRange?.('reject', e.rev)
+                          }}
+                        >
+                          {t('appRevReject')}
+                        </button>
+                        <button
+                          type="button"
+                          className="ai-revision-accept"
+                          disabled={trackChangesLocked}
+                          onClick={(ev) => {
+                            ev.stopPropagation()
+                            onRevisionRange?.('accept', e.rev)
+                          }}
+                        >
+                          {t('appRevAccept')}
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
         <EditQueueCard
           items={editQueue}
           editor={editor}
@@ -1699,8 +1941,9 @@ export function AiPanel({
           onQueue={enqueueDraft}
           queuePlaceholder={AI_QUEUE_LABELS[lang].queuePlaceholder}
           header={
-            (hasScopeSelection || attachments.length > 0) && (
+            (hasScopeSelection || attachments.length > 0 || attachedSkills.length > 0) && (
               <>
+                <AiSkillChips lang={lang} names={attachedSkills} onRemove={toggleSkill} />
                 {hasScopeSelection && (
                   <div className="ai-scope-row">
                     <span className="ai-scope-hint">
@@ -1822,17 +2065,20 @@ export function AiPanel({
             <>
               <AiModelPicker bridge={MODEL_BRIDGE} lang={lang} />
               {sessionUsage && <AiUsageChip usage={sessionUsage} session lang={lang} />}
+              <AiSkillsMenu
+                lang={lang}
+                listSkills={listSkillsForMenu}
+                selected={attachedSkills}
+                onToggle={toggleSkill}
+                onAddFile={() => void pickAttachments()}
+                onManage={() => void window.desktop.openSkillsSettings?.()}
+              />
               <button
-                className="ai-attach-btn"
-                onClick={pickAttachments}
-                data-tip={t('aiAttachTitle')}
-                aria-label={t('aiAttachTitle')}
-              >
-                <img src={attachIcon} alt="" aria-hidden />
-              </button>
-              <button
+                type="button"
                 className={`ai-track-btn${trackChanges ? ' on' : ''}`}
                 onClick={toggleTrackChanges}
+                aria-pressed={trackChanges}
+                disabled={trackChangesLocked}
                 data-tip={trackChanges ? t('aiTrackOnTitle') : t('aiTrackOffTitle')}
               >
                 <span className="ai-track-dot" aria-hidden />

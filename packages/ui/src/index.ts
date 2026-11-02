@@ -3,6 +3,8 @@ export { AiComposer } from './AiComposer'
 export { AiQueueStrip } from './AiQueueStrip'
 export { useChatRunQueue, type ChatRunQueue, type QueuedChatMessage } from './chat-run-queue'
 export { AI_QUEUE_LABELS, type AiQueueStripLabels } from './strings-ai-queue'
+export { AI_SKILLS_LABELS, type AiSkillsLabels } from './strings-ai-skills'
+export { AiSkillsMenu, AiSkillChips, type AiSkillsMenuEntry } from './AiSkillsMenu'
 export { AiUsageChip, addTokenUsage, formatTokenCount, type AiTokenUsageView } from './AiUsageChip'
 export { AI_USAGE_LABELS, type AiUsageLabels } from './strings-ai-usage'
 export { AiScopeQuote, type AiScopeQuoteData } from './AiScopeQuote'
@@ -70,6 +72,7 @@ export { IconSend, IconStop, type IconProps } from './icons'
 export { Markdown, type MarkdownNav } from './Markdown'
 export { FILE_NAV_SCHEME, createFileNav, fileNavHref, parseFileNavHref } from './file-nav'
 export { isSymbolFontFamily } from './symbol-fonts'
+export { suggestFileName, type SuggestFileNameOptions } from './ai-naming-client'
 export {
   BUILTIN_FONT_FAMILIES,
   fontFamiliesFor,
@@ -144,3 +147,4 @@ export {
 export { ProviderLogo } from './provider-logos'
 export { useRedactLabelField } from './use-redact-label'
 export type { RedactLabelField } from './use-redact-label'
+export { useScrollWindow } from './scroll-window'

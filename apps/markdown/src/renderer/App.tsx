@@ -22,6 +22,7 @@ import type { Editor } from '@tiptap/core'
 import { TextSelection } from '@tiptap/pm/state'
 import { exportImages } from './export/imageExport'
 import type { StringKey } from './i18n/locale'
+import { countWords } from '../../../docs/src/renderer/word-count'
 import { t as translate, useI18n } from './i18n/locale'
 import {
   buildFrontmatterRaw,
@@ -41,10 +42,13 @@ import { tiptapFindTarget } from './editor/findTarget'
 import { collectOutline, type OutlineItem } from './editor/outline'
 import { buildSlashItems } from './editor/slashCommand'
 import type { SlashController, SlashMenuState } from './editor/slashCommand'
-import { wikiFragmentPosition } from './editor/wikilink'
+import { wikiFragmentPosition, wikiTargetOf } from './editor/wikilink'
 import type { WikiSuggestController, WikiSuggestState } from './editor/wikiSuggest'
+import { invalidateWikiHeads } from './editor/wikiSuggest'
 import { dirOf, setImageBaseDir, VIEW_IMAGE_EVENT } from './editor/localImage'
 import { Ribbon } from './components/Ribbon'
+import { deriveAutoFileName } from './auto-file-name'
+import { modelSaveAsName, proposedSaveName } from './file-naming'
 import type { MarkdownTheme } from '../shared/markdown-theme'
 import { ImageHostDialog } from './components/ImageHostDialog'
 import { RedactMenu } from './components/RedactMenu'
@@ -53,6 +57,7 @@ import { SourcePane } from './components/SourcePane'
 import { SlashMenu, type SlashMenuHandle } from './components/SlashMenu'
 import { WikiSuggestMenu, type WikiSuggestMenuHandle } from './components/WikiSuggestMenu'
 import { BacklinksPane } from './components/BacklinksPane'
+import { TagsPane } from './components/TagsPane'
 import { GraphView } from './components/GraphView'
 import { ToastHost } from './components/toast'
 import { showToast } from './components/toast-bus'
@@ -126,18 +131,7 @@ function applyImageRewrites(
 }
 
 /** Measure a document image via the DOM (the editor already displays it) */
-/** File name for an AI-generated untitled document: first heading, else first words */
-export function deriveAutoFileName(editor: Editor): string {
-  const doc = editor.state.doc
-  for (let i = 0; i < doc.childCount; i++) {
-    const node = doc.child(i)
-    const text = node.textContent.replace(/\s+/g, ' ').trim()
-    if (!text) continue
-    if (node.type.name === 'heading') return text.slice(0, 60)
-    return text.split(' ').slice(0, 8).join(' ').slice(0, 60)
-  }
-  return ''
-}
+export { deriveAutoFileName } from './auto-file-name'
 
 export default function App() {
   const { lang, t } = useI18n()
@@ -181,6 +175,7 @@ export default function App() {
     () => Number(localStorage.getItem('mdapp.outlineWidth')) || undefined,
   )
   const [backlinksOpen, setBacklinksOpen] = useState(false)
+  const [tagsOpen, setTagsOpen] = useState(false)
   const [graphOpen, setGraphOpen] = useState(false)
   const [sourceViewOpen, setSourceViewOpen] = useState(false)
   const [sourceText, setSourceText] = useState('')
@@ -240,6 +235,15 @@ export default function App() {
     return map ? spliceMarkdown(current, current.state.doc, map) : current.getMarkdown()
   }
   const filePathRef = useRef<string | null>(null)
+  /** text last read from or written to disk; a watcher tick that reads the same text is a touch, not an edit */
+  const diskTextRef = useRef<string | null>(null)
+  const overwriteRef = useRef(false)
+  const [diskNotice, setDiskNoticeState] = useState<'changed' | 'conflict' | null>(null)
+  const diskNoticeRef = useRef<'changed' | 'conflict' | null>(null)
+  const setDiskNotice = (next: 'changed' | 'conflict' | null) => {
+    diskNoticeRef.current = next
+    setDiskNoticeState(next)
+  }
   const slashMenuRef = useRef<SlashMenuHandle>(null)
   const wikiSuggestMenuRef = useRef<WikiSuggestMenuHandle>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -293,6 +297,32 @@ export default function App() {
     })
   }, [])
 
+  /**
+   * Close an unresolved `[[link]]` the Obsidian way: create the note it names
+   * and open it. Main decides where the file lands (beside this document, or
+   * under the vault root when the target carries a directory) and never
+   * overwrites; the answer carries the `#fragment`, so opening rides the same
+   * path every resolved link takes and no document text has to change.
+   */
+  const createWikiNoteAndOpen = useCallback(
+    (target: string): void => {
+      // The browser test harness stubs markdownApi without the Electron-only
+      // wiki channels; a missing API leaves the link as written.
+      if (typeof window.markdownApi.createWikiNote !== 'function') return
+      void window.markdownApi.createWikiNote({ target }).then((result) => {
+        if (!result.ok) {
+          showToast(translate('wikiLinkUnresolved', { target }), 'error')
+          return
+        }
+        void window.markdownApi.rememberWikiFragment(result.path, result.fragment)
+        void window.markdownApi.openSourcePath(result.path)
+        // a link into the note already on screen opens no tab; jump here
+        if (filePathRef.current === result.path) jumpToWikiFragment(result.path)
+      })
+    },
+    [jumpToWikiFragment],
+  )
+
   const extensions = useMemo(() => {
     const controller: SlashController = {
       onOpen: setSlashState,
@@ -321,10 +351,31 @@ export default function App() {
         },
         // the module-level `t`, not the hook's: this memo holds the closure for
         // the life of the editor, and the hook's `t` is a new function each render
-        onUnresolved: (target) => showToast(translate('wikiLinkUnresolved', { target }), 'error'),
+        onUnresolved: (target, embed) => {
+          // an embed of a missing file usually names a picture, which an empty
+          // note cannot stand in for; only a link creates its note
+          if (embed) {
+            showToast(translate('wikiLinkUnresolved', { target }), 'error')
+            return
+          }
+          createWikiNoteAndOpen(wikiTargetOf(target))
+        },
+      },
+      blockLink: {
+        getDocumentPath: () => filePathRef.current ?? '',
+        onCopied: (link) => showToast(translate('blockLinkCopied', { link })),
+        onNothing: () => showToast(translate('blockLinkNone'), 'error'),
       },
     })
-  }, [insertImage, jumpToWikiFragment])
+  }, [createWikiNoteAndOpen, insertImage, jumpToWikiFragment])
+
+  // status-bar text statistics: Word's CJK counting rule (asian chars count
+  // one by one, non-asian words by whitespace) shared with the docs status bar
+  const [docStats, setDocStats] = useState<{ words: number; chars: number } | null>(null)
+  const statsOf = (text: string) => ({
+    words: countWords(text),
+    chars: Array.from(text).length,
+  })
 
   const editor = useEditor({
     extensions,
@@ -335,6 +386,7 @@ export default function App() {
     onUpdate: ({ editor: updated, transaction }) => {
       if (!transaction.getMeta('uiOnly')) markDirty()
       setOutlineItems(collectOutline(updated))
+      setDocStats(statsOf(updated.getText()))
       syncSourceFromEditorRef.current()
     },
   })
@@ -366,6 +418,9 @@ export default function App() {
    */
   const loadFromPath = useCallback(
     (path: string, raw: string) => {
+      diskTextRef.current = raw
+      overwriteRef.current = false
+      setDiskNotice(null)
       const mode = textModeForPath(path)
       setTextMode(mode)
       if (sourceApplyTimerRef.current) clearTimeout(sourceApplyTimerRef.current)
@@ -377,6 +432,7 @@ export default function App() {
         const { text, format } = readSourceText(raw)
         sourceTextRef.current = text
         sourceFormatRef.current = format
+        setDocStats(statsOf(text))
         setFilePath(path)
         setFmText('')
         setFmOpen(false)
@@ -455,16 +511,26 @@ export default function App() {
    */
   const doSaveSource = useCallback(async (mode: SaveMode): Promise<boolean> => {
     if (statusRef.current !== 'ready' || savingRef.current) return false
+    if (diskNoticeRef.current && !overwriteRef.current) {
+      // the user has not chosen between the two versions yet; autosave must not pick for them
+      setDiskNotice('conflict')
+      return false
+    }
     savingRef.current = true
     setSaveState('saving')
     const textAtSave = sourceTextRef.current
     try {
+      const written = writeSourceText(textAtSave, sourceFormatRef.current)
       const result = await window.markdownApi.save({
-        text: writeSourceText(textAtSave, sourceFormatRef.current),
+        text: written,
         imageSources: [],
         mode,
+        overwrite: overwriteRef.current,
       })
       if (result.ok && 'path' in result) {
+        diskTextRef.current = written
+        overwriteRef.current = false
+        setDiskNotice(null)
         // an edit that landed mid-write is still unsaved
         const unchanged = sourceTextRef.current === textAtSave
         setFilePath(result.path)
@@ -481,6 +547,7 @@ export default function App() {
         }
         return true
       }
+      if (!result.ok && result.conflict) setDiskNotice('conflict')
       setSaveState(result.ok ? 'idle' : 'failed')
       return false
     } catch (err) {
@@ -550,6 +617,7 @@ export default function App() {
     (text: string) => {
       setSourceText(text)
       pendingSourceRef.current = text
+      setDocStats(statsOf(text))
       markDirty()
       if (sourceApplyTimerRef.current) clearTimeout(sourceApplyTimerRef.current)
       sourceApplyTimerRef.current = setTimeout(flushSource, SOURCE_APPLY_DEBOUNCE_MS)
@@ -580,11 +648,15 @@ export default function App() {
 
   /** Serialize and write to disk; false when canceled/failed (caller keeps the tab open) */
   const doSave = useCallback(
-    async (mode: SaveMode, suggestedName?: string): Promise<boolean> => {
+    async (mode: SaveMode, suggestedName?: string, proposedName?: string): Promise<boolean> => {
       if (sourceMode) return doSaveSource(mode)
       flushSource()
       const current = editorRef.current
       if (!current || statusRef.current !== 'ready' || savingRef.current) return false
+      if (diskNoticeRef.current && !overwriteRef.current) {
+        setDiskNotice('conflict')
+        return false
+      }
       savingRef.current = true
       setSaveState('saving')
       try {
@@ -601,8 +673,30 @@ export default function App() {
           sourceAtSave,
         )
         const imageSources = imageSourcesFromEditor(current)
-        const result = await window.markdownApi.save({ text, imageSources, mode, suggestedName })
+        // A never-saved document is offered a name derived from its own
+        // content: its first heading, else its first words. It prefills the
+        // save dialog rather than replacing it — the reader still chooses where
+        // the file goes, and a save never waits on a model. A name the caller
+        // proposed outright (the ribbon's "Name with AI") wins over both.
+        const defaultName = await proposedSaveName(current, {
+          filePath: filePathRef.current,
+          suggestedName,
+          proposedName,
+        })
+        const result = await window.markdownApi.save({
+          text,
+          imageSources,
+          mode,
+          suggestedName,
+          overwrite: overwriteRef.current,
+          ...(defaultName ? { defaultName } : {}),
+        })
         if (result.ok && 'path' in result) {
+          diskTextRef.current = result.writtenText ?? text
+          overwriteRef.current = false
+          setDiskNotice(null)
+          // what this note offers `[[...#` has just changed on disk
+          invalidateWikiHeads()
           const unchanged =
             editorRef.current?.state.doc === docAtSave &&
             envelopeRef.current.frontmatter === fmAtSave
@@ -658,6 +752,7 @@ export default function App() {
           }
           return true
         }
+        if (!result.ok && result.conflict) setDiskNotice('conflict')
         setSaveState(result.ok ? 'idle' : 'failed')
         return false
       } catch (err) {
@@ -670,6 +765,80 @@ export default function App() {
     },
     [flushSource, sourceMode, doSaveSource],
   )
+
+  /** another program wrote the file: swap the text in, keep caret and scroll, leave undo history alone */
+  const reloadFromDisk = useCallback(
+    (path: string, raw: string) => {
+      const current = editorRef.current
+      const caret = current?.state.selection.from ?? 1
+      const scrollTop = scrollRef.current?.scrollTop ?? 0
+      // loadFromPath replaces the content; with the status parked the resulting update is not an edit
+      statusRef.current = 'loading'
+      try {
+        loadFromPath(path, raw)
+        if (isSourceMode(textModeForPath(path))) sourceRef.current?.setDoc(readSourceText(raw).text)
+      } finally {
+        statusRef.current = 'ready'
+      }
+      if (current && !isSourceMode(textModeForPath(path))) {
+        current
+          .chain()
+          .setMeta('addToHistory', false)
+          .setMeta('uiOnly', true)
+          .setTextSelection(Math.min(caret, current.state.doc.content.size))
+          .run()
+      }
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = scrollTop
+      })
+      dirtyRef.current = false
+      setDirty(false)
+      window.markdownApi.setDirty(false)
+      setSaveState('idle')
+    },
+    [loadFromPath],
+  )
+
+  const reloadNow = useCallback(async () => {
+    const path = filePathRef.current
+    if (!path) return
+    try {
+      window.markdownApi.ackFileChangedOnDisk()
+      reloadFromDisk(path, await window.markdownApi.readFile(path))
+    } catch (err) {
+      console.error('[markdown] reload from disk failed:', err)
+    }
+  }, [reloadFromDisk])
+
+  const keepMine = useCallback(() => {
+    overwriteRef.current = true
+    setDiskNotice(null)
+    window.markdownApi.ackFileChangedOnDisk()
+  }, [])
+
+  const overwriteNow = useCallback(() => {
+    overwriteRef.current = true
+    setDiskNotice(null)
+    void doSave('save')
+  }, [doSave])
+
+  /**
+   * Ask the model to name this document, on request, then open Save As with its
+   * answer prefilled.
+   *
+   * The stem goes into the dialog rather than renaming the file on disk: a file
+   * that may be open elsewhere, referenced from a note, or synced is not
+   * something to move behind the reader's back. A declined or empty answer
+   * leaves the dialog on the document's current name, so this is a no-op
+   * rather than a failure.
+   */
+  const nameWithAi = useCallback(async () => {
+    const current = editorRef.current
+    if (!current || statusRef.current !== 'ready' || savingRef.current) return
+    const stem = await modelSaveAsName(current)
+    if (!stem) return
+    await doSave('saveAs', undefined, stem)
+  }, [doSave])
 
   /** `outPath` (headless export only) skips the save dialog; resolves true when a file was written. */
   const runExport = useCallback(
@@ -917,6 +1086,30 @@ export default function App() {
         window.markdownApi.sendCloseSaveResult(ok)
       })()
     })
+    const offDisk = window.markdownApi.onFileChangedOnDisk((changedPath) => {
+      // the watcher keeps refusing saves until the change is acknowledged; a
+      // change parked behind the bar stays unacknowledged until the user decides
+      let awaitingUser = false
+      void (async () => {
+        try {
+          if (changedPath !== filePathRef.current || statusRef.current !== 'ready') return
+          const raw = await window.markdownApi.readFile(changedPath)
+          if (changedPath !== filePathRef.current || raw === diskTextRef.current) return
+          const dirtyNow = dirtyRef.current || savingRef.current
+          if (dirtyNow) {
+            diskTextRef.current = raw
+            setDiskNotice('changed')
+            awaitingUser = true
+            return
+          }
+          reloadFromDisk(changedPath, raw)
+        } catch (err) {
+          console.error('[markdown] reload after external change failed:', err)
+        } finally {
+          if (!awaitingUser) window.markdownApi.ackFileChangedOnDisk()
+        }
+      })()
+    })
     const offRenamed = window.markdownApi.onFileRenamed((newPath) => {
       // A rename that changes the extension changes what the file is, so the
       // open document has to follow it onto the matching surface. Reloading
@@ -980,10 +1173,11 @@ export default function App() {
       offSave()
       offReadText()
       offClose()
+      offDisk()
       offRenamed()
       window.removeEventListener('keydown', onKeyDown, true)
     }
-  }, [doSave, printDoc, zoomIn, zoomOut, openFind, toggleSource, loadFromPath, t])
+  }, [doSave, printDoc, zoomIn, zoomOut, openFind, toggleSource, loadFromPath, reloadFromDisk, t])
 
   // Chromium reports trackpad pinch as ctrl+wheel. Also support Cmd/Ctrl+scroll
   // while the pointer is over the document canvas.
@@ -1154,6 +1348,7 @@ export default function App() {
         dirty={dirty}
         onSave={() => void doSave('save')}
         onSaveAs={() => void doSave('saveAs')}
+        onNameWithAi={() => void nameWithAi()}
         onFind={() => openFind(false)}
         autoSave={autoSave}
         onToggleAutoSave={setAutoSave}
@@ -1170,8 +1365,11 @@ export default function App() {
         onToggleOutline={() => setOutlineOpen((v) => !v)}
         hasOutline={outlineItems.length > 0}
         backlinksOpen={backlinksOpen}
+        tagsOpen={tagsOpen}
         onToggleBacklinks={() => setBacklinksOpen((v) => !v)}
+        onToggleTags={() => setTagsOpen((v) => !v)}
         onOpenGraph={() => setGraphOpen(true)}
+        onCopyBlockLink={() => editor?.commands.copyBlockLink()}
         spellcheck={spellcheck}
         onToggleSpellcheck={() => setSpellcheck((v) => !v)}
         sourceMode={sourceMode}
@@ -1235,7 +1433,21 @@ export default function App() {
             onOpen={(path) => void window.markdownApi.openSourcePath(path)}
           />
         )}
+        {tagsOpen && !sourceMode && (
+          <TagsPane onOpen={(path) => void window.markdownApi.openSourcePath(path)} />
+        )}
         <div className="app-content">
+          {diskNotice && (
+            <div className="disk-notice" role="status">
+              <span>{t(diskNotice === 'changed' ? 'diskChangedMsg' : 'diskConflictMsg')}</span>
+              <button type="button" onClick={() => void reloadNow()}>
+                {t('diskReload')}
+              </button>
+              <button type="button" onClick={diskNotice === 'changed' ? keepMine : overwriteNow}>
+                {t(diskNotice === 'changed' ? 'diskKeepMine' : 'diskOverwrite')}
+              </button>
+            </div>
+          )}
           {showFind && findTarget && (
             <FindPanel
               target={findTarget}
@@ -1292,6 +1504,14 @@ export default function App() {
                 </span>
               )}
               {fileName && <span className="status-item status-file">{fileName}</span>}
+              {fileName && docStats && (
+                <span className="status-item status-stats">
+                  {t('statusWords', { n: docStats.words })} ·{' '}
+                  {t('statusChars', {
+                    n: docStats.chars,
+                  })}
+                </span>
+              )}
             </div>
             <div className="status-right">
               {statusText && (

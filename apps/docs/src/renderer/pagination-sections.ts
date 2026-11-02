@@ -3,6 +3,7 @@
 import type { SectionInfo, SectionSettings, TextFlowDirection } from '@genoffice/docx-engine'
 
 import { mirrorShiftPx } from './page-margins'
+import { hfHasVariant, hfVariantReservedPx, type HfVariant } from './pagination-hf'
 import { columnLineSplits } from './pagination-slices'
 import type {
   BlockBox,
@@ -73,6 +74,27 @@ export function effectiveBottomPx(set: SectionSettings, footerPx: number): numbe
   return Math.max(twipsToPx(set.marginBottom), footerPx > 0 ? dist + footerPx : 0)
 }
 
+/** Single-section slicing geometry of the first-page / even-page variants: the
+ *  page renders the variant's strips (pageHfOf), so its capacity must follow
+ *  their push-down. An even capacity equal to the default one is omitted. */
+export function singleVariantGeomOf(
+  set: SectionSettings,
+  hf: SectionHfHeights,
+): Pick<SectionGeom, 'firstContentHeight' | 'evenContentHeight'> {
+  const capacity = (variant: HfVariant) => {
+    const { headerPx, footerPx } = hfVariantReservedPx(hf, variant)
+    return (
+      twipsToPx(set.pageHeight) - effectiveTopPx(set, headerPx) - effectiveBottomPx(set, footerPx)
+    )
+  }
+  const base = capacity('default')
+  const even = hfHasVariant(hf, 'even') ? capacity('even') : undefined
+  return {
+    ...(hfHasVariant(hf, 'first') ? { firstContentHeight: capacity('first') } : {}),
+    ...(even !== undefined && Math.abs(even - base) > 0.01 ? { evenContentHeight: even } : {}),
+  }
+}
+
 /** Typed line-grid pitch (pt) of one section (w:docGrid lines/linesAndChars), else null */
 export function sectionGridPitchPt(s: SectionInfo): number | null {
   const g = s.settings.docGrid
@@ -101,18 +123,25 @@ export function docGridPitchPt(sections: SectionInfo[]): number | null {
 
 /**
  * Character-grid letter-spacing delta (pt) of one section. Word probes
- * (2026-09-02, MS Mincho/Arial, sizes 10.5/12pt): with w:docGrid
- * type="linesAndChars" and w:charSpace=N, EVERY character in the section
- * (east-asian, latin, halfwidth) advances by its natural width + N/4096 pt —
- * a uniform letter-spacing, positive or negative. Types lines/default ignore
- * charSpace; snapToChars snaps to a Normal-style-based pitch instead (not
- * modeled). Table cells and snapToGrid=0 paragraphs are spaced too; headers
- * and footers are not.
+ * (2026-09-02 and 2026-10-22, MS Mincho/Times New Roman/Arial, 10.5/12pt):
+ * with w:docGrid type="linesAndChars" and w:charSpace=N, every character in
+ * the section advances by its natural width + N/4096 pt, positive or negative.
+ * Under settings.xml <w:balanceSingleByteDoubleByteWidth/> single-byte
+ * characters (Latin, digits, spaces, halfwidth kana, any font or size) get
+ * half of it (N/8192) while full-width ones keep N/4096
+ * (singleByteCharSpacePt). Types lines/default ignore charSpace; snapToChars
+ * snaps to a Normal-style-based pitch instead (not modeled). Table cells and
+ * snapToGrid=0 paragraphs are spaced too; headers and footers are not.
  */
 export function sectionCharSpacePt(s: SectionInfo): number {
   const g = s.settings.docGrid
   if (!g || g.type !== 'linesAndChars' || !g.charSpace) return 0
   return g.charSpace / 4096
+}
+
+/** letter-spacing of single-byte characters for a full-width delta of `pt` */
+export function singleByteCharSpacePt(pt: number, balanced: boolean): number {
+  return balanced ? pt / 2 : pt
 }
 
 /**
@@ -548,6 +577,50 @@ export function sectionTopMarginSpecs(
 }
 
 /**
+ * Blocks that open a new page by instruction: the first block of every section
+ * that starts one (nextPage/evenPage/oddPage) and the block after an explicit
+ * page break (a trailing w:br page or the block's own pageBreakBefore / leading
+ * w:br). A w:tblpPr table floated at the bottom of the closing page is a CSS
+ * float whose box reaches past the break in the DOM: a table opening the next
+ * section was pushed below it and the band charged to the new page; a heading
+ * after a break-only paragraph sat inside the band and the page turn, clamped
+ * below the float, left it on the closing page above the table (prod holdout
+ * 040). Word never carries a float across a page, so the opener clears it (the
+ * cleared position is the page boundary).
+ */
+export function sectionPageStartSpecs(
+  blocks: BlockBox[],
+  sections: SectionInfo[],
+): ColumnBlockPlacement[] {
+  const openers = new Set<HTMLElement>()
+  for (let i = 1; i < sections.length; i++) {
+    const s = sections[i]
+    if (s.startType === 'continuous' || s.startType === 'nextColumn') continue
+    const first = blocks.find((b) => b.docxIndex === s.firstBlockIndex && b.el)
+    if (first?.el) openers.add(first.el)
+  }
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i]
+    if (!b.el || b.floated) continue
+    const prev = i > 0 ? blocks[i - 1] : undefined
+    if (b.breakBefore || prev?.breakAfter) openers.add(b.el)
+  }
+  return [...openers].map((el) => ({ el, dx: 0, dy: 0, sectionPageStart: true }))
+}
+
+/** edge-triggered: the pass whose wrap widths or section-start clears differ
+ *  from the last pass's follows up once with them in the DOM */
+export function wrapWidthSig(specs: ColumnBlockPlacement[]): string {
+  return specs
+    .map((s) =>
+      s.sectionPageStart
+        ? `clear:${s.el.dataset.idx ?? '?'}`
+        : `${Math.round(s.widthPx ?? -1)}:${Math.round(s.contentWPx ?? -1)}`,
+    )
+    .join(',')
+}
+
+/**
  * Per-block docGrid pitch for documents whose sections disagree on the typed
  * line grid (mixed pitches, or typed + untyped): each block carries its own
  * section's pitch through the layout decoration channel. Uniform docs get no
@@ -589,6 +662,7 @@ export function sectionGridPitchSpecs(
 export function sectionCharSpaceSpecs(
   blocks: BlockBox[],
   sections: SectionInfo[],
+  balanced = false,
 ): ColumnBlockPlacement[] {
   const deltas = sections.map(sectionCharSpacePt)
   if (!deltas.some((d) => d !== 0) || deltas.every((d) => d === deltas[0])) return []
@@ -597,7 +671,14 @@ export function sectionCharSpaceSpecs(
     if (!b.el) continue
     const si = Math.max(0, Math.min(b.section ?? 0, deltas.length - 1))
     const d = deltas[si] ?? 0
-    if (d !== 0) specs.push({ el: b.el, dx: 0, dy: 0, charSpacePt: d })
+    if (d !== 0)
+      specs.push({
+        el: b.el,
+        dx: 0,
+        dy: 0,
+        charSpacePt: d,
+        ...(balanced ? { charSpaceSbPt: singleByteCharSpacePt(d, true) } : {}),
+      })
   }
   return specs
 }
@@ -756,11 +837,18 @@ export function verticalTextSpecs(
 export function sectionGeoms(
   sections: SectionInfo[],
   hfHeights?: SectionHfHeights[],
+  evenOddHf = false,
 ): SectionGeom[] {
   return sections.map((s, i) => {
     const cols = sectionColumns(s)
     let forceBreak = false
     let colBreakStart = false
+    const numberingParity =
+      evenOddHf && i > 0 && s.startType === 'nextPage' && s.pageNumberStart !== undefined
+        ? s.pageNumberStart % 2 === 0
+          ? 'evenPage'
+          : 'oddPage'
+        : undefined
     if (i > 0) {
       // nextColumn with the same multi-column count advances one column (Word,
       // tdf#135343 c14/c15); a changed count or a single-column layout acts like a
@@ -782,27 +870,36 @@ export function sectionGeoms(
     const set = s.settings
     const hf = hfHeights?.[i]
     const vertical = sectionVertical(set)
-    const firstContentHeight =
-      !vertical && (hf?.firstHeaderPx !== undefined || hf?.firstFooterPx !== undefined)
-        ? twipsToPx(set.pageHeight) -
-          effectiveTopPx(set, hf.firstHeaderPx ?? 0) -
-          effectiveBottomPx(set, hf.firstFooterPx ?? 0)
-        : undefined
-    const bodyH =
-      twipsToPx(set.pageHeight) -
-      effectiveTopPx(set, hf?.headerPx ?? 0) -
-      effectiveBottomPx(set, hf?.footerPx ?? 0)
+    const hfOf = (variant: HfVariant) =>
+      hf ? hfVariantReservedPx(hf, variant) : { headerPx: 0, footerPx: 0 }
+    const bodyHOf = (variant: HfVariant) => {
+      const { headerPx, footerPx } = hfOf(variant)
+      return (
+        twipsToPx(set.pageHeight) - effectiveTopPx(set, headerPx) - effectiveBottomPx(set, footerPx)
+      )
+    }
+    const firstBodyH = hf && hfHasVariant(hf, 'first') ? bodyHOf('first') : undefined
+    const firstContentHeight = vertical ? undefined : firstBodyH
+    const bodyH = bodyHOf('default')
+    const evenBodyH = hf && hfHasVariant(hf, 'even') ? bodyHOf('even') : undefined
     const bodyW = twipsToPx(set.pageWidth - set.marginLeft - set.marginRight)
     return {
       // vertical text fills the page sideways: lines are bodyH long and stack across bodyW
       contentHeight: vertical ? bodyW : bodyH,
       ...(firstContentHeight !== undefined ? { firstContentHeight } : {}),
+      ...(!vertical && evenBodyH !== undefined && Math.abs(evenBodyH - bodyH) > 0.01
+        ? { evenContentHeight: evenBodyH }
+        : {}),
+      ...(vertical && firstBodyH !== undefined ? { firstBodyHeight: firstBodyH } : {}),
+      ...(vertical && evenBodyH !== undefined ? { evenBodyHeight: evenBodyH } : {}),
+      ...(s.pageNumberStart !== undefined ? { pageNumberStart: s.pageNumberStart } : {}),
       contentWidth: vertical ? bodyH : bodyW,
       ...(vertical ? { vertical } : {}),
-      topPx: effectiveTopPx(set, hf?.headerPx ?? 0),
+      topPx: effectiveTopPx(set, hfOf('default').headerPx),
       pageHeightPx: twipsToPx(set.pageHeight),
       forceBreak,
       startType: s.startType,
+      ...(numberingParity ? { numberingParity } : {}),
       // colWidths only for explicit-width columns: the narrower-column gate is
       // meaningless when every column is the same width
       ...(cols > 1
@@ -898,7 +995,8 @@ export function foldSectionStartSpaceBefore(blocks: BlockBox[], geoms: SectionGe
     const sec = block.section ?? 0
     if (!block.el || sec === (prev.section ?? sec) || !geoms[sec]?.forceBreak) continue
     const after = prev.spaceAfterPx ?? 0
-    const sb = Math.min(parseFloat(getComputedStyle(block.el).marginTop) || 0, after)
+    const margin = block.marginBeforePx ?? (parseFloat(getComputedStyle(block.el).marginTop) || 0)
+    const sb = Math.min(margin, after)
     if (sb <= 0.5) continue
     prev.spaceAfterPx = after - sb
     prev.height -= sb

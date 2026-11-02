@@ -185,6 +185,7 @@ export const ru = {
   appCtxSendToBack: 'На задний план',
   appCtxBringForward: 'Переместить вперед',
   appCtxSendBackward: 'Переместить назад',
+  appCtxRotate: 'Повернуть',
   appCtxRotateLeft90: 'Повернуть на 90° влево',
   appCtxRotateRight90: 'Повернуть на 90° вправо',
   appCtxFlipH: 'Отразить по горизонтали',
@@ -224,6 +225,8 @@ export const ru = {
   appMasterFillNone: 'Без заливки',
   appMasterStroke: 'Цвет контура…',
   appMasterStrokeNone: 'Без контура',
+  appMasterInsertTextBox: 'Надпись',
+  appMasterInsertShape: 'Фигуры',
   appStartOpening: 'Открытие…',
   appReadingSlideTitle:
     'Щелкните, чтобы перейти к следующему слайду (Esc — выйти из режима чтения)',

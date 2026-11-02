@@ -188,6 +188,7 @@ export const hi = {
   appCtxSendToBack: 'सबसे पीछे भेजें',
   appCtxBringForward: 'आगे लाएँ',
   appCtxSendBackward: 'पीछे भेजें',
+  appCtxRotate: 'घुमाएँ',
   appCtxRotateLeft90: '90° बाएँ घुमाएँ',
   appCtxRotateRight90: '90° दाएँ घुमाएँ',
   appCtxFlipH: 'क्षैतिज पलटें',
@@ -227,6 +228,8 @@ export const hi = {
   appMasterFillNone: 'कोई भरण नहीं',
   appMasterStroke: 'रूपरेखा रंग…',
   appMasterStrokeNone: 'कोई रूपरेखा नहीं',
+  appMasterInsertTextBox: 'पाठ बॉक्स',
+  appMasterInsertShape: 'आकृतियाँ',
   appStartOpening: 'खोला जा रहा है…',
   appReadingSlideTitle:
     'अगली स्लाइड पर जाने के लिए क्लिक करें (पठन दृश्य से बाहर निकलने के लिए Esc)',

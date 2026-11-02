@@ -49,6 +49,7 @@ const WINDOWS_1252_DECODER = new TextDecoder('windows-1252')
  * index what survives. null only for a BOM-declared UTF-32 file.
  */
 function decodeTextBytes(bytes: Buffer): string | null {
+  if (bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 0xfe && bytes[3] === 0xff) return null
   if (bytes[0] === 0xff && bytes[1] === 0xfe) {
     if (bytes[2] === 0 && bytes[3] === 0) return null // UTF-32LE BOM
     return bytes.toString('utf16le', 2)
@@ -88,7 +89,7 @@ function sniffBinary(bytes: Buffer): BinaryKind {
 }
 
 export interface ParseFileOptions {
-  /// Character budget for extractors that can stop early (xlsx today).
+  /// Character budget for extractors that can stop early (xlsx and docx today).
   maxChars?: number
 }
 
@@ -148,10 +149,10 @@ export async function parseFileToText(
         return {
           ok: true,
           kind: 'text',
-          text: sniffed === 'zip' ? await docxToText(bytes) : await docToText(bytes),
+          text: sniffed === 'zip' ? await docxToText(bytes, opts) : await docToText(bytes),
         }
       case 'docx':
-        return { ok: true, kind: 'text', text: await docxToText(bytes) }
+        return { ok: true, kind: 'text', text: await docxToText(bytes, opts) }
       case 'ppt':
         return { ok: true, kind: 'text', text: await pptToText(bytes) }
       case 'pptx':

@@ -9,6 +9,12 @@ export const it = {
   redactDialogPlaceholder: 'Nome del segnaposto, es. telefono del cliente',
   redactCancel: 'Annulla',
   redactInsert: 'Nascondi',
+  diskChangedMsg: 'Questo file è stato modificato da un altro programma.',
+  diskConflictMsg:
+    'Questo file è cambiato su disco; il salvataggio sovrascriverà quelle modifiche.',
+  diskReload: 'Ricarica',
+  diskKeepMine: 'Mantieni il mio',
+  diskOverwrite: 'Sovrascrivi comunque',
 
   loading: 'Caricamento…',
   loadFailed: 'Impossibile aprire il file',
@@ -66,6 +72,7 @@ export const it = {
   openExternal: 'Link aperto nel browser',
   save: 'Salva (⌘S)',
   saveAs: 'Salva con nome…',
+  aiNameFile: 'Assegna un nome con IA…',
   ribbonCollapse: 'Riduci a icona la barra multifunzione',
   ribbonExpand: 'Espandi la barra multifunzione',
   ribbonGroupInsert: 'Inserisci',
@@ -96,6 +103,7 @@ export const it = {
   alignLeft: 'Allinea a sinistra',
   alignCenter: 'Centra',
   alignRight: 'Allinea a destra',
+  alignJustify: 'Giustifica',
   fontSizeDec: 'Riduci dimensione carattere',
   fontSizeInc: 'Aumenta dimensione carattere',
   typography: 'Tipografia',

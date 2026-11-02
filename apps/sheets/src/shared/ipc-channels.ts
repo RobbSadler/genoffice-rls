@@ -47,6 +47,8 @@ export const HEADER_FOOTER_PICTURE_POSITION = /^[LCR][HF](EVEN|FIRST)?$/
 
 export const IPC_CHANNELS = {
   selectWorkbook: 'workbook:select',
+  openEncryptedWorkbook: 'workbook:open-encrypted',
+  updateWorkbookPassword: 'workbook:update-password',
   /** Multi-file picker + sidecar sessions for merging into the current workbook */
   selectWorkbooksForMerge: 'workbook:select-for-merge',
   /** Open explicit paths (chat attachments) as merge-source sessions — no dialog */
@@ -67,6 +69,10 @@ export const IPC_CHANNELS = {
   recalcWorkbook: 'workbook:recalc',
   readWorkbookMedia: 'workbook:read-media',
   readPivotDefinition: 'workbook:read-pivot-definition',
+  /** The cells the reader withheld from the model (xl/gxRedactions.json) */
+  readWorkbookRedactions: 'workbook:read-redactions',
+  /** Data › Queries & Connections: the workbook's connections, read-only (xl/connections.xml) */
+  readWorkbookQueries: 'workbook:read-queries',
   readLocalImage: 'shell:read-local-image',
   closeWorkbook: 'workbook:close',
   saveWorkbook: 'workbook:save',

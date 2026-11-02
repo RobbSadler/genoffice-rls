@@ -1,6 +1,21 @@
 import type { zh } from './zh'
 
 export const pt = {
+  // ── Withholding cells from the model ──
+  redactMenuLabel: 'Ocultar a seleção da IA',
+  redactDialogDesc:
+    'O conteúdo selecionado continua no documento e no arquivo; o modelo vê apenas o marcador. Dê-lhe um nome para que saiba o que representa.',
+  redactDialogScope:
+    'Isso se aplica apenas à IA deste aplicativo. A CLI, as ferramentas MCP e a exportação sem interface leem o arquivo diretamente e ainda veem essas palavras.',
+  redactDialogPlaceholder: 'Nome do marcador, ex.: telefone do cliente',
+  redactCancel: 'Cancelar',
+  redactInsert: 'Ocultar',
+  redactEnable: 'Clique com o botão direito numa seleção para ocultá-la do modelo.',
+  redactNeedsSavedRow:
+    'Esta linha ainda não está no ficheiro. Guarde primeiro e depois oculte a célula.',
+  redactRecoveredFromNames:
+    'Outra aplicação reescreveu este ficheiro e descartou o registo do que está oculto. As células ocultas foram recuperadas a partir dos nomes na pasta de trabalho; guardar restaura o registo completo.',
+
   appMergeWorkbooks: 'Mesclar pastas de trabalho',
   appMergeWorkbooksTip: 'Adicionar planilhas de outros arquivos do Excel a esta pasta de trabalho',
   appMergeWorkbooksPicking: 'Escolha os arquivos para mesclar…',
@@ -106,9 +121,10 @@ export const pt = {
   appChartNoRepoint: 'Este gráfico não permite redefinir os intervalos de dados.',
   appKeepOneSeries: 'Mantenha pelo menos uma série.',
   appNoCategoriesToSwitch: 'Não há categorias para alternar.',
-  appComboNoSelectData:
-    'Alterar a fonte de dados de um gráfico de combinação ainda não é suportado.',
+  appSelectDataUnsupported: 'Não há suporte para alterar a origem de dados deste tipo de gráfico.',
   appSeriesName: 'Nome da série',
+  appSeriesType: 'Tipo de série',
+  appSecondaryAxis: 'Eixo secundário',
   appValuesRange: 'Intervalo de valores',
   appCategoriesRange: 'Intervalo de categorias',
   appKeepUnchanged: 'Manter inalterado',
@@ -192,6 +208,13 @@ export const pt = {
   appInvalidGroupField: 'Campo de agrupamento inválido.',
   appInvalidPageField: 'Campo de filtro de relatório inválido.',
   appPivotPageItemMissing: 'O item de filtro "{item}" não pertence ao campo "{label}".',
+  appInvalidPivotBaseField:
+    'O campo base de "Mostrar valores como" deve estar em linhas ou colunas.',
+  appPivotBaseFieldMissing:
+    'O modo "Mostrar valores como" de um campo de valores precisa de um campo base.',
+  appPivotBaseFieldNotAxis:
+    'O campo base "{label}" deve estar nas linhas ou colunas da tabela dinâmica.',
+  appPivotBaseItemMissing: 'O item base "{item}" não pertence ao campo "{label}".',
   appInvalidLabelFilterField: 'O campo do filtro de rótulo é inválido.',
   appInvalidValueFieldIndex: 'O índice do campo de valores {index} é inválido.',
   appInvalidValueField: 'Campo de valores inválido.',
@@ -342,8 +365,8 @@ export const pt = {
     'Esta planilha contém uma Tabela Dinâmica — mover intervalos ainda não é suportado.',
   appMergeOverTable:
     'A seleção sobrepõe uma tabela do Excel — mesclar células dentro de uma tabela ainda não é suportado.',
-  appTableFilterNoEdit:
-    'O filtro desta planilha pertence a uma tabela do Excel — a edição ainda não pode ser salva.',
+  appFilterToggleFailed:
+    'O filtro não foi aplicado — selecione primeiro o intervalo com seus dados.',
   appAutofillStreaming:
     'O preenchimento automático em uma área ainda em streaming não é permitido por enquanto.',
   appDvNeedsIndexed:
@@ -397,6 +420,9 @@ export const pt = {
   appTableNameUsed: 'O nome de tabela "{name}" já foi usado nesta sessão.',
   appTableNameInFile: 'O nome de tabela "{name}" já é usado por uma tabela no arquivo.',
   appTableOverlapsSession: 'O intervalo sobrepõe a tabela "{name}" criada nesta sessão.',
+  appTableOverlapsFile: 'O intervalo sobrepõe a tabela "{name}" do arquivo.',
+  appTableAlreadyInTable:
+    'A seleção já está na tabela "{name}" — altere o estilo em Design da Tabela.',
   appTablesNeedFile: 'Abra primeiro um arquivo XLSX — as tabelas são gravadas no arquivo.',
   appTableSelectRange: 'Selecione primeiro o intervalo de dados — cabeçalhos na primeira linha.',
   appTableCreated: 'Tabela criada — salve com ⌘S.',
@@ -482,6 +508,7 @@ export const pt = {
   appGridlinesHidden: 'Linhas de grade ocultas.',
   appGridlinesShown: 'Linhas de grade exibidas.',
   appShowingFormulas: 'Exibindo fórmulas — alterne novamente para ver os valores.',
+  appShowingFormulasActive: 'Exibindo fórmulas',
   appShowingValues: 'Exibindo valores calculados.',
   appTraceNoFormula: 'Rastrear Precedentes: a célula ativa não tem fórmula.',
   appTraceNoRefs: 'Rastrear Precedentes: esta fórmula não tem referências de células.',
@@ -598,8 +625,6 @@ export const pt = {
   appSaveFailed: 'Não foi possível salvar a pasta de trabalho.',
   appCfRuleUnsaveable:
     'Esta regra de formatação condicional não pode ser salva em xlsx — use outro tipo de regra.',
-  appSaveErrX14Dv:
-    'Esta planilha tem validação de dados estendida (x14); editar suas regras de validação ainda não é suportado.',
   appSaveErrMultiSelectList:
     'A validação de lista de seleção múltipla não pode ser salva em xlsx — exclua a regra antes de salvar.',
   appSaveErrX14Cf:
@@ -727,6 +752,7 @@ export const pt = {
   appExportPdfTitle: 'Exportar como PDF',
   appSaveTitle: 'Salvar (⌘S)',
   appSaveAs: 'Salvar Como',
+  aiNameFile: 'Nomear com IA…',
   appUndo: 'Desfazer',
   appRedo: 'Refazer',
   appUnsavedEditOne: '● {count} edição não salva',
@@ -759,7 +785,6 @@ export const pt = {
   appLinkPlaceholder: 'https://example.com ou Sheet1!A1',
   appRemoveLink: 'Remover Link',
   appNotAvailableYet: 'Ainda não disponível',
-  appComingSoon: 'Em breve',
   appGroupChartLayouts: 'Layouts de gráfico',
   appAddChartElement: 'Adicionar Elemento de Gráfico',
   appAddChartElementTitle: 'Títulos, rótulos de dados, legenda',
@@ -1193,6 +1218,8 @@ export const pt = {
   appRefreshAll: 'Atualizar Tudo',
   appWorkbookNoPivot: 'Nenhuma tabela dinâmica nesta pasta de trabalho.',
   appRefreshAllTitle: 'Atualizar todas as tabelas dinâmicas',
+  appQueriesConnections: 'Consultas e conexões',
+  appQueriesConnectionsTitle: 'Listar as consultas e conexões de dados da pasta de trabalho',
   appErrorCheckingDetail: 'Verificar valores de erro na planilha',
   appErrorsFound: '{count} erros — em {cell}: {value}',
   appCheckingErrors: 'Procurando erros na planilha inteira…',
@@ -1228,6 +1255,7 @@ export const pt = {
   appGroupForecast: 'Previsão',
   appWhatIfAnalysis: 'Teste de Hipóteses',
   appGoalSeek: 'Atingir meta',
+  appDataTable: 'Tabela de dados',
   appWhatIfTitle: 'Resolver uma entrada para um valor-alvo',
   appGoalSeekNeedsFormula: 'A célula deve conter uma fórmula.',
   appGoalSeekByCellNotNumber: 'A célula a alterar deve conter um número ou estar vazia.',
@@ -1310,6 +1338,22 @@ export const pt = {
   appOpenFileFirst: 'Abra um arquivo primeiro',
   appNoPassword: 'Sem senha',
   appProtectWorkbook: 'Proteger Pasta de Trabalho',
+  appChangePassword: 'Alterar Senha',
+  appWorkbookPasswordChanged: 'A senha da pasta de trabalho foi atualizada.',
+  appEncryptedOpenTitle: 'Abrir pasta de trabalho protegida por senha',
+  appEncryptedOpenCopy: 'Digite a senha para desbloquear esta pasta de trabalho.',
+  appEncryptedPasswordLabel: 'Senha',
+  appEncryptedOpen: 'Abrir',
+  appChangePasswordTitle: 'Alterar a senha da pasta de trabalho',
+  appChangePasswordCopy: 'Escolha uma nova senha e confirme-a abaixo.',
+  appNewPasswordLabel: 'Nova senha',
+  appConfirmPasswordLabel: 'Confirmar nova senha',
+  appPasswordsMismatch: 'As senhas não coincidem.',
+  appPasswordUpdateFailed: 'Não foi possível atualizar a senha da pasta de trabalho.',
+  appPasswordUpdating: 'Atualizando…',
+  appUpdatePassword: 'Atualizar senha',
+  appWorkbookNotPasswordProtected:
+    'Esta pasta de trabalho não está protegida por uma senha de abertura.',
   appAllowEditRanges: 'Permitir Edição de Intervalos',
   appGroupClipboard: 'Área de Transferência',
   appPaste: 'Colar',
@@ -1499,6 +1543,10 @@ export const pt = {
   appNotePicturesNone: 'Nenhuma anotação desta pasta de trabalho exibe uma imagem.',
   appNotePictureUnavailable: 'Não é possível exibir esta imagem.',
   appNotePicturesToggle: 'Imagens das anotações',
+  appNoteInsertPicture: 'Inserir imagem',
+  appNotePictureInserted: 'Imagem adicionada à nota em {cell}. Salve para gravá-la no ficheiro.',
+  appNotePictureRemoved: 'Imagem removida da nota em {cell}.',
+  appNotePictureRemove: 'Remover imagem',
   appCommentsPaneTitle: 'Comentários',
   appThreadReply: 'Responder',
   appThreadReplyPlaceholder: 'Responder…',
@@ -1569,4 +1617,29 @@ export const pt = {
   appVisualFlipV: 'Inverter verticalmente',
   appVisualFlipH: 'Inverter horizontalmente',
   appCtxPasteVisual: 'Colar imagem ou forma',
+
+  // ── Spelling check (F7 / Review ▸ Proofing) ──
+  appSpellTitle: 'Ortografia',
+  appSpellBtnDetail: 'Verificar o texto da planilha (F7)',
+  appSpellToggle: 'Verificar ortografia',
+  appSpellToggleTip:
+    'Ativa a verificação ortográfica (F7 e o botão Revisão); desativada, as caixas de comentário deixam de mostrar sublinhados',
+  appSpellOn: 'Verificação ortográfica ativada.',
+  appSpellOff: 'A verificação ortográfica está desativada. Ative-a em Revisão ▸ Revisão de Texto.',
+  appSpellRecheck: 'Verificar novamente',
+  appSpellNone: 'Nenhum erro de ortografia suspeito encontrado.',
+  appSpellFindings: '{count} erros suspeitos. Clique em uma linha para localizar.',
+  appSpellTruncated: 'Células de texto demais; somente as primeiras foram verificadas.',
+  appSpellColWord: 'Suspeita',
+  appSpellIgnore: 'Ignorar',
+  appSpellIgnoreAll: 'Ignorar tudo',
+  appSpellLearn: 'Adicionar ao dicionário',
+  appSpellNoSuggestions: 'Sem sugestões',
+  appSpellIgnoredAll: '"{word}" não será mais sinalizado nesta sessão.',
+  appSpellLearned: '"{word}" foi adicionado ao dicionário.',
+  appSpellChanged: '{address} corrigido.',
+  appSpellChangeFailed: 'Não foi possível corrigir {address}.',
+  appSpellUnavailable: 'A verificação ortográfica não está disponível nesta janela.',
+  appSpellReplaceAll: 'Substituir tudo por "{suggestion}"',
+  appSpellChangedAll: 'Corrigidas {count} células de "{word}".',
 } satisfies Record<keyof typeof zh, string>

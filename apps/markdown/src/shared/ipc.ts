@@ -20,8 +20,13 @@ export const MARKDOWN_CHANNELS = {
   takeWikiFragment: 'markdown:take-wiki-fragment',
   /** list the vault's notes for the `[[` suggester, breadth-first from the root */
   listWikiNotes: 'markdown:list-wiki-notes',
+  /** create the note an unresolved `[[wiki link]]` names (never overwrites) */
+  createWikiNote: 'markdown:create-wiki-note',
+  /** what `[[Note#` offers: the target note's headings and block ids */
+  wikiHeads: 'markdown:wiki-heads',
   /** notes whose links land on the given path (the backlinks panel) */
   wikiBacklinks: 'markdown:wiki-backlinks',
+  wikiTags: 'markdown:wiki-tags',
   /** the vault's link graph (nodes + resolved edges, the graph view) */
   wikiGraph: 'markdown:wiki-graph',
   save: 'markdown:save',
@@ -33,6 +38,8 @@ export const MARKDOWN_CHANNELS = {
   closeSaveRequest: 'markdown:close-save-request',
   closeSaveResult: 'markdown:close-save-result',
   fileRenamed: 'markdown:file-renamed',
+  fileChangedOnDisk: 'markdown:file-changed-on-disk',
+  ackFileChangedOnDisk: 'markdown:ack-file-changed-on-disk',
   pickImage: 'markdown:pick-image',
   saveImage: 'markdown:save-image',
   readImage: 'markdown:read-image',
@@ -90,6 +97,55 @@ export interface WikiNoteEntry {
   /** path relative to the walk root, shown under the name in the menu */
   relPath: string
 }
+
+export interface WikiCreateNoteRequest {
+  /**
+   * The link's target as written, alias dropped: `Note`, `folder/Note`,
+   * `Note#Heading`. The fragment rides back on the answer for the caller to
+   * open on; the file part is what gets created.
+   */
+  target: string
+}
+
+/** a heading of the note `[[Note#` lists */
+export interface WikiHeadingEntry {
+  kind: 'heading'
+  /** heading text as the fragment addresses it, marker stripped */
+  text: string
+  level: number
+}
+
+/** a block id the note already carries, offered by `[[Note#^` */
+export interface WikiBlockIdEntry {
+  kind: 'block'
+  /** the id without the caret, as the completion adds its own */
+  id: string
+  /** the line's text before the marker, '' for a lone marker line */
+  text: string
+}
+
+export type WikiHeadEntry = WikiHeadingEntry | WikiBlockIdEntry
+
+export interface WikiHeadsRequest {
+  /** the link's file part as typed: `Note`, `folder/Note` */
+  target: string
+  /** absolute path of the open document, '' while untitled */
+  fromPath: string
+}
+
+export type WikiCreateNoteResult =
+  | {
+      ok: true
+      /** absolute path of the note, created or already there */
+      path: string
+      /** the spelling a link resolves by: sanitized stem, directories kept (`folder/Note`) */
+      target: string
+      /** the `#Heading` part of the target, '' when there was none */
+      fragment: string
+      /** false when a file already occupied the path and nothing was written */
+      created: boolean
+    }
+  | { ok: false }
 
 /** a note whose link lands on the asked-for path */
 export interface WikiBacklink {
@@ -200,6 +256,15 @@ export interface SaveMarkdownRequest {
    * Ignored when the document already has a path.
    */
   suggestedName?: string
+  /**
+   * Name offered in the Save As dialog for a document that has never been
+   * saved. A plain ⌘S on an untitled document still asks where the file goes —
+   * the model-proposed name (or the first heading) prefills that dialog rather
+   * than replacing it, so the reader still chooses the location.
+   */
+  defaultName?: string
+  /** write even though the file changed on disk since it was loaded or last saved */
+  overwrite?: boolean
 }
 
 export type SaveMarkdownResult =
@@ -212,7 +277,7 @@ export type SaveMarkdownResult =
       writtenText?: string
     }
   | { ok: true; canceled: true }
-  | { ok: false; error: string }
+  | { ok: false; error: string; conflict?: true }
 
 /** AI channels are app-wide shared ipcMain handlers (shell registers via docs-main registerAiIpc); pass-through only */
 export const AI_CHANNELS = {
@@ -306,8 +371,23 @@ export interface MarkdownApi {
    * library cannot stall the popup.
    */
   listWikiNotes(): Promise<WikiNoteEntry[]>
+  /**
+   * Create the note an unresolved `[[target]]` names — Obsidian's "create new
+   * note". A target with a directory lands under the vault root, a bare name
+   * beside the open document (both decided in main, where the open paths
+   * live). An existing file is opened, never overwritten. `ok: false` when
+   * the target cannot name a note at all.
+   */
+  createWikiNote(request: WikiCreateNoteRequest): Promise<WikiCreateNoteResult>
+  /**
+   * What `[[Note#` offers: resolve the typed target the way the resolver does
+   * and list that note's headings and block ids. Read-only — the suggester
+   * lists what is there, it never writes an id into another file.
+   */
+  wikiHeads(request: WikiHeadsRequest): Promise<WikiHeadEntry[]>
   /** Notes whose links resolve to `path` (the backlinks panel); '' answers []. */
   wikiBacklinks(path: string): Promise<WikiBacklink[]>
+  wikiTags(): Promise<{ tag: string; files: string[] }[]>
   /** The vault's link graph, notes as nodes and resolved links as edges. */
   wikiGraph(): Promise<WikiGraph>
   /** Headless export mode: the PDF path this hidden renderer must export to, null in normal use */
@@ -339,6 +419,10 @@ export interface MarkdownApi {
   sendCloseSaveResult(ok: boolean): void
   /** The file was renamed on disk (Home list rename) — renderer syncs its display path */
   onFileRenamed(handler: (newPath: string) => void): () => void
+  /** Another program wrote the open file; the renderer re-reads and decides whether to reload */
+  onFileChangedOnDisk(handler: (path: string) => void): () => void
+  /** the renderer has read the changed file and decided; a later save is checked against this version */
+  ackFileChangedOnDisk(): void
   /**
    * Pick an image file and copy it into `assets/` next to the open document;
    * returns the relative path to author into the markdown, or null when the
@@ -414,6 +498,12 @@ export interface MarkdownApi {
   onAiSettingsChanged(handler: () => void): () => void
   /** shell only: switch to Home and open Settings › AI Model (rejects in standalone) */
   openAiModelSettings(): Promise<void>
+  /** shell only: switch to Home and open Settings › Integrations (the skills list) */
+  openSkillsSettings(): Promise<void>
+  /** the skills the user installed into GenOffice (userData/skills) */
+  skillsList(): Promise<UserSkillEntry[]>
+  /** the body of one installed skill, by name — the main process resolves the path */
+  skillText(name: string): Promise<string>
   /** Genspark login state (shell-registered ai:gsk-status) — gates generate_image with the cloud-tools toggle */
   aiGskStatus(): Promise<GenSparkAccountStatus>
   aiStream(request: AiStreamRequest): Promise<void>
@@ -430,4 +520,10 @@ export interface MarkdownApi {
     url?: string
     error?: string
   }>
+}
+
+export interface UserSkillEntry {
+  name: string
+  description: string
+  relevant: boolean
 }

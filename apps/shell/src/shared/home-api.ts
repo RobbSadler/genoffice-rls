@@ -13,8 +13,38 @@ import type {
   CodexModelCatalog,
 } from '@genoffice/ai-provider'
 import type { UpdateChannel, UpdateUiState } from './update-api'
-import type { KbFileInfo, KbReadPage, KbSearchHit } from '@genoffice/agent-core'
+import type {
+  AttachmentInfo,
+  CliContext,
+  CliRunRequest,
+  CliRunResult,
+  KbFileInfo,
+  KbReadPage,
+  KbSearchHit,
+} from '@genoffice/agent-core'
 import type { AiPanelPrefs } from '@genoffice/ui/ai-panel-prefs'
+
+export interface AttachmentAddResult {
+  accepted: AttachmentInfo[]
+  /** per-file rejection messages, already localized by the main process */
+  rejected: string[]
+}
+
+export interface AttachmentReadResult {
+  ok: boolean
+  error?: string
+  totalChars?: number
+  text?: string
+  offset?: number
+}
+
+export interface AttachmentImageResult {
+  ok: boolean
+  /** raw base64 (no data: URL prefix) */
+  base64?: string
+  mime?: string
+  error?: string
+}
 
 /** UI language; kept self-contained here (mirrors Lang in @genoffice/i18n) */
 
@@ -40,6 +70,7 @@ export type UiLanguage =
   | 'hi'
   | 'zh-TW'
   | 'vi'
+  | 'tr'
 
 /** UI theme preference */
 export type UiTheme = 'light' | 'dark' | 'system'
@@ -160,6 +191,7 @@ export type DecisionEndpoint =
   | 'perplexity-flash'
   | 'liquid'
   | 'liquid-ultra'
+  | 'openai'
   | 'cloudflare'
   | 'cloudflare-flash'
   | 'kev'
@@ -215,6 +247,12 @@ export interface DefaultAppStatus {
   manualOnly: boolean
 }
 
+export interface UserSkillEntry {
+  name: string
+  description: string
+  relevant: boolean
+}
+
 export interface HomeApi {
   /** unified recents across document types, newest first (paged) */
   recents(query?: RecentQuery): Promise<RecentPage>
@@ -239,6 +277,12 @@ export interface HomeApi {
   // ---- knowledge-base ask panel: the reader's starred corpus, askable ----
   /** the starred corpus as the AI's knowledge base */
   kbList(): Promise<KbFileInfo[]>
+  /** the skills the user installed into GenOffice */
+  skillsList(): Promise<UserSkillEntry[]>
+  /** one installed skill's body, by name */
+  skillText(name: string): Promise<string>
+  /** open Settings › Integrations (the skills list) */
+  openSkillsSettings(): Promise<void>
   /** full-text search over the corpus */
   kbSearch(query: { q: string; limit?: number }): Promise<KbSearchHit[]>
   /** one page of a corpus file's parsed text (path must be in kbList) */
@@ -249,6 +293,20 @@ export interface HomeApi {
     format: 'md' | 'docx'
     content: string
   }): Promise<{ path: string }>
+  /** the work and output directories the Ask AI CLI tools use for one conversation */
+  kbCliContext(sessionId: string): Promise<CliContext>
+  /** run the bundled genoffice CLI for one conversation (confined; see main/home-cli.ts);
+   *  `sources` are the attached files whose folders the CLI may read */
+  kbRunCli(
+    sessionId: string,
+    request: CliRunRequest & { sources?: string[] },
+  ): Promise<CliRunResult>
+  /** chat attachments: the files:* handlers Docs registers in the shell main process */
+  pickAttachments(): Promise<AttachmentAddResult | null>
+  addAttachmentPaths(paths: string[]): Promise<AttachmentAddResult>
+  addPastedImage(data: ArrayBuffer, ext: string): Promise<AttachmentAddResult>
+  readAttachment(path: string, offset: number, maxChars: number): Promise<AttachmentReadResult>
+  readAttachmentImage(path: string): Promise<AttachmentImageResult>
   /** the user's AI provider settings (shared with every app's panel) */
   aiGetSettings(): Promise<AiSettings>
   /** one streamed model turn over the shared ai:stream handler */
@@ -319,6 +377,12 @@ export interface HomeApi {
   getUpdateChannel(): Promise<UpdateChannel>
   /** switch + persist the update channel; triggers an immediate update check */
   setUpdateChannel(channel: UpdateChannel): Promise<void>
+  /** whether the launch and periodic background update checks run (default on) */
+  getAutoUpdateCheck(): Promise<boolean>
+  setAutoUpdateCheck(on: boolean): Promise<void>
+  /** background checks download quietly and install on quit instead of showing the card (default off) */
+  getSilentInstallUpdate(): Promise<boolean>
+  setSilentInstallUpdate(on: boolean): Promise<void>
   /** Genspark account status (gsk login state; to be upgraded to a signup/account system later) */
   accountStatus(): Promise<AccountStatus>
   /** start Genspark login (opens the browser; accountStatus flips to logged-in on completion); returns whether the launch succeeded */
@@ -354,6 +418,12 @@ export interface HomeApi {
   getAutoSaveDefault(): Promise<AutoSaveDefault>
   /** persist the AutoSave default; broadcasts 'app:auto-save-default-changed' to all web contents */
   setAutoSaveDefault(on: boolean): Promise<void>
+  /** whether long-idle background tabs release their renderer once many are open (default on) */
+  getTabSleepEnabled(): Promise<boolean>
+  setTabSleepEnabled(on: boolean): Promise<void>
+  /** whether the documents open at the last close reopen at launch (default off) */
+  getRestoreLastSession(): Promise<boolean>
+  setRestoreLastSession(on: boolean): Promise<void>
   /** current local MCP server state (running/enabled/port/url) */
   getMcpStatus(): Promise<McpStatus>
   /** enable/disable the MCP server and/or change its port/background/logging; applies and persists, returns the new state */
@@ -375,6 +445,8 @@ export interface HomeApi {
   setAnalyticsEnabled(enabled: boolean): Promise<boolean>
   /** name on comments and tracked changes; `value` is the stored override ('' = use `fallback`, the OS account) */
   getAuthorName(): Promise<AuthorNameSetting>
+  getLegacyImportPrompt(): Promise<boolean>
+  setLegacyImportPrompt(prompt: boolean): Promise<boolean>
   /** persist; broadcasts 'app:author-name-changed' (the effective name) to all web contents */
   setAuthorName(value: string): Promise<AuthorNameSetting>
   /** AI panel text size + chat-input spellcheck (persisted in userData/app-settings.json) */
@@ -613,6 +685,10 @@ export const HOME_CHANNELS = {
   setLanguage: 'home:set-language',
   getUpdateChannel: 'home:get-update-channel',
   setUpdateChannel: 'home:set-update-channel',
+  getAutoUpdateCheck: 'home:get-auto-update-check',
+  setAutoUpdateCheck: 'home:set-auto-update-check',
+  getSilentInstallUpdate: 'home:get-silent-install-update',
+  setSilentInstallUpdate: 'home:set-silent-install-update',
   accountStatus: 'home:account-status',
   accountLogin: 'home:account-login',
   accountLoginEvent: 'home:account-login-event',
@@ -628,6 +704,10 @@ export const HOME_CHANNELS = {
   setDocumentTheme: 'home:set-document-theme',
   getAutoSaveDefault: 'home:get-auto-save-default',
   setAutoSaveDefault: 'home:set-auto-save-default',
+  getTabSleepEnabled: 'home:get-tab-sleep-enabled',
+  setTabSleepEnabled: 'home:set-tab-sleep-enabled',
+  getRestoreLastSession: 'home:get-restore-last-session',
+  setRestoreLastSession: 'home:set-restore-last-session',
   getMcpStatus: 'home:get-mcp-status',
   setMcpSettings: 'home:set-mcp-settings',
   getMcpLogs: 'home:get-mcp-logs',
@@ -636,6 +716,8 @@ export const HOME_CHANNELS = {
   getAnalyticsEnabled: 'home:get-analytics-enabled',
   setAnalyticsEnabled: 'home:set-analytics-enabled',
   getAuthorName: 'home:get-author-name',
+  getLegacyImportPrompt: 'home:get-legacy-import-prompt',
+  setLegacyImportPrompt: 'home:set-legacy-import-prompt',
   setAuthorName: 'home:set-author-name',
   getAiPanelPrefs: 'home:get-ai-panel-prefs',
   setAiPanelPrefs: 'home:set-ai-panel-prefs',

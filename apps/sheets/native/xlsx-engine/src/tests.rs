@@ -968,6 +968,62 @@ fn open_single_sheet(sheet_xml: &str) -> WorkbookMetadata {
     sessions.open(&path).unwrap()
 }
 
+/// The validation rules the sidecar reads out of a worksheet.
+fn data_validations_of(sheet_xml: &str) -> Vec<DataValidationRule> {
+    let (_dir, path) = open_fixture(&[
+        (
+            "xl/workbook.xml",
+            r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        ),
+        ("xl/worksheets/sheet1.xml", sheet_xml),
+    ]);
+    let mut sessions = WorkbookSessions::new();
+    let metadata = sessions.open(&path).unwrap();
+    let range = CellRange {
+        start_row: 0,
+        end_row: 99,
+        start_column: 0,
+        end_column: 9,
+    };
+    let result = sessions
+        .read_range(&metadata.session_id, "sheet-1", &range)
+        .unwrap();
+    result.data_validations
+}
+
+/// The x14 form of a rule only counts inside Excel's x14 data-validation
+/// extension; in the conditional-formatting extension Excel ignores it, so
+/// the reader does too.
+#[test]
+fn reads_x14_validations_only_from_the_data_validation_extension() {
+    let rules = r#"<x14:dataValidations xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main" count="1">
+<x14:dataValidation type="list"><x14:formula1><xm:f>Lookup!$A$1</xm:f></x14:formula1><xm:sqref>C1:C9</xm:sqref></x14:dataValidation>
+</x14:dataValidations>"#;
+    let in_dv_ext = data_validations_of(&format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<dimension ref="A1:J100"/>
+<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+<extLst><ext uri="{{CCE6A557-97BC-4b89-ADB6-D9C93CAAB3DF}}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">{rules}</ext></extLst>
+</worksheet>"#
+    ));
+    assert_eq!(in_dv_ext.len(), 1);
+    assert_eq!(in_dv_ext[0].rule_type, "list");
+    assert_eq!(in_dv_ext[0].formulas, vec!["Lookup!$A$1".to_owned()]);
+
+    let in_cf_ext = data_validations_of(&format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<dimension ref="A1:J100"/>
+<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+<extLst><ext uri="{{78C0D931-6437-407d-A8EE-F0AAD7539E65}}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">{rules}</ext></extLst>
+</worksheet>"#
+    ));
+    assert!(in_cf_ext.is_empty());
+}
+
 /// A few far-apart cells make a huge bounding box; the host's load gates
 /// need the stored count, not the box.
 #[test]
@@ -4480,7 +4536,10 @@ fn reads_the_picture_a_note_is_showing() {
         .iter()
         .find(|comment| comment.row == 0 && comment.column == 0)
         .expect("the A1 comment");
-    let older_image = older.image.as_ref().expect("the imagedata spelling resolves");
+    let older_image = older
+        .image
+        .as_ref()
+        .expect("the imagedata spelling resolves");
     assert_eq!(older_image.media_path, "xl/media/image1.png");
     let filled = comments
         .iter()
@@ -4496,11 +4555,7 @@ fn reads_the_picture_a_note_is_showing() {
         .unwrap();
     assert_eq!(media.media_type, "image/png");
     assert_eq!(
-        base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &media.base64,
-        )
-        .unwrap(),
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &media.base64,).unwrap(),
         b"the picture bytes"
     );
 }
@@ -4989,7 +5044,7 @@ fn reads_xml_entry_that_matches_its_declaration() {
 
 /// A password-encrypted .xlsx is an OLE2 compound container, not a ZIP
 /// package: the open must explain that instead of surfacing the zip
-/// reader's "invalid Zip archive: Could not find EOCD" (#2076).
+/// reader's "invalid Zip archive: Could not find EOCD" (genoffice#2076).
 #[test]
 fn encrypted_workbook_reports_password_protection() {
     let dir = tempfile::tempdir().unwrap();

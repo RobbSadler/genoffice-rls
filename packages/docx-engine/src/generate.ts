@@ -6,6 +6,7 @@ import type {
   ImageWrap,
   ParaFormat,
   ParaFrame,
+  PropChangeInfo,
   RevisionInfo,
   Run,
   TabStop,
@@ -13,6 +14,7 @@ import type {
   TableModel,
 } from './types'
 import { escapeXmlAttr, escapeXmlText } from './xml-utils'
+import { resolvePropChangeXml } from './revision-xml'
 
 export interface GenerateContext {
   /** heading level -> styleId existing in the original styles.xml */
@@ -347,26 +349,35 @@ export function applyShapeWrapAt(
   } else if (!hasAnchor) {
     next = applyImageWrap(drawing, wrap, undefined, undefined, zOrder)
   } else {
-    const behind = wrap === 'behind' ? '1' : '0'
-    const wrapElement =
-      wrap === 'front' || wrap === 'behind'
-        ? '<wp:wrapNone/>'
-        : wrap === 'topBottom'
-          ? '<wp:wrapTopAndBottom/>'
-          : '<wp:wrapSquare wrapText="bothSides"/>'
-    next = drawing
-      .replace(WRAP_ELEMENT_RE, '')
-      .replace(/<wp:anchor[^>]*>/, (tag) =>
-        tag.includes('behindDoc=')
-          ? tag.replace(/behindDoc="[^"]*"/, `behindDoc="${behind}"`)
-          : tag.replace(/<wp:anchor/, `<wp:anchor behindDoc="${behind}"`),
-      )
-    if (zOrder !== undefined) next = setAnchorRank(next, zOrder)
-    next = /<wp:docPr/.test(next)
-      ? next.replace(/<wp:docPr/, `${wrapElement}<wp:docPr`)
-      : next.replace(/<a:graphic[\s>]/, (m) => `${wrapElement}${m}`)
+    next = swapAnchorWrap(drawing, wrap, zOrder)
   }
   return paragraphXml.slice(0, seg.start) + next + paragraphXml.slice(seg.end)
+}
+
+/**
+ * Switch the wrap mode of an existing wp:anchor drawing in place: only the
+ * wrap element, behindDoc and (when given) relativeHeight change, so the
+ * positionH/V bytes keep the object where it was.
+ */
+export function swapAnchorWrap(drawingXml: string, wrap: ImageWrap, zOrder?: number): string {
+  const behind = wrap === 'behind' ? '1' : '0'
+  const wrapElement =
+    wrap === 'front' || wrap === 'behind'
+      ? '<wp:wrapNone/>'
+      : wrap === 'topBottom'
+        ? '<wp:wrapTopAndBottom/>'
+        : '<wp:wrapSquare wrapText="bothSides"/>'
+  let next = drawingXml
+    .replace(WRAP_ELEMENT_RE, '')
+    .replace(/<wp:anchor[^>]*>/, (tag) =>
+      tag.includes('behindDoc=')
+        ? tag.replace(/behindDoc="[^"]*"/, `behindDoc="${behind}"`)
+        : tag.replace(/<wp:anchor/, `<wp:anchor behindDoc="${behind}"`),
+    )
+  if (zOrder !== undefined) next = setAnchorRank(next, zOrder)
+  return /<wp:docPr/.test(next)
+    ? next.replace(/<wp:docPr/, `${wrapElement}<wp:docPr`)
+    : next.replace(/<a:graphic[\s>]/, (m) => `${wrapElement}${m}`)
 }
 
 // ---- protected field / formula token patching ----
@@ -547,7 +558,7 @@ export function patchMathTokens(xml: string, tokens: readonly string[]): string 
 // ---- table cell text patching ----
 
 /** top-level segments of `tag` between [from, to), depth-aware for nesting */
-function xmlSegments(
+export function xmlSegments(
   xml: string,
   tag: string,
   from: number,
@@ -666,14 +677,17 @@ function patchCellXml(tcXml: string, paras: readonly CellParaPatch[]): string | 
           : `<w:p>${firstPPr}<w:r>${rPr}${cellRunContentXml(entry)}</w:r>${keep}</w:p>`
       }
       const template = originals[Math.min(i, originals.length - 1)] ?? ''
-      const emitted = runsXml(entry.runs, null)
+      const pPr = entry.format
+        ? mergeCellParaFormat(pPrOf(template), entry.format, entry.original)
+        : pPrOf(template)
+      const emitted = entry.xml ?? runsXml(entry.runs, null)
       const emittedMedia = new Set(mediaRIds(emitted))
       const keep = aligned
         ? carriedRunsOf(template, emittedMedia)
         : i === 0
           ? originals.map((p) => carriedRunsOf(p, emittedMedia)).join('')
           : ''
-      return `<w:p>${pPrOf(template)}${emitted}${keep}</w:p>`
+      return `<w:p>${pPr}${emitted}${keep}</w:p>`
     })
     .join('')
   return openTag + tcPr + body + '</w:tc>'
@@ -701,7 +715,17 @@ function cellRunContentXml(text: string): string {
 }
 
 /** one cell paragraph: control-char text (legacy first-run-rPr rebuild), rich runs, or null = keep the original paragraph bytes */
-export type CellParaPatch = string | { runs: Run[] } | null
+export type CellParaPatch =
+  | string
+  | {
+      runs: Run[]
+      /** pre-rendered run XML (fields etc.) used instead of runsXml(runs) */
+      xml?: string
+      /** paragraph format: only the pPr groups that differ from `original` are rebuilt (mergeCellParaFormat) */
+      format?: ParaFormat
+      original?: ParaFormat
+    }
+  | null
 
 /** per-cell patch: paragraph patches, or nested-table cell texts by nested index */
 export type CellTextsPatch =
@@ -785,6 +809,11 @@ function patchNestedInCell(
 export interface TextboxParaPatch {
   runs: Run[]
   align?: 'left' | 'center' | 'right' | 'justify' | 'distribute' | null
+  /** list membership write-back: sets or clears the paragraph's w:numPr.
+   * Always explicit (null clears) so leaving a list lands in the file. */
+  numPr?: { numId: string; ilvl: number } | null
+  /** left indent in twips; null clears w:ind/@w:left, undefined keeps the original */
+  indentLeft?: number | null
 }
 
 /** plain text of one w:p fragment (w:t + tabs/breaks), for change detection */
@@ -808,7 +837,46 @@ function paraPlainText(pXml: string): string {
   return out
 }
 
-/** set or remove w:jc inside a pPr fragment (creating pPr when needed) */
+/** Set or clear w:numPr in a paragraph's pPr. CT_PPr order places numPr after
+ * pStyle and the keep-together flags, before pBdr, shd, tabs, spacing, ind and
+ * jc — so it is inserted after pStyle when present (the common textbox shape)
+ * and otherwise directly after the pPr opening tag. */
+function pPrWithNumPr(pPr: string, numPr: TextboxParaPatch['numPr']): string {
+  const out = pPr.replace(/<w:pPr([^>]*)\/>/, '<w:pPr$1></w:pPr>')
+  const stripped = out.replace(/<w:numPr>[\s\S]*?<\/w:numPr>/, '').replace(/<w:numPr\/>/, '')
+  if (!numPr) return stripped === '<w:pPr></w:pPr>' ? '' : stripped
+  const num = `<w:numPr><w:ilvl w:val="${numPr.ilvl}"/><w:numId w:val="${numPr.numId}"/></w:numPr>`
+  const styleEnd = stripped.indexOf('<w:pStyle ')
+  const afterStyle = styleEnd === -1 ? -1 : stripped.indexOf('/>', styleEnd)
+  const pPrOpen = stripped.indexOf('>')
+  const insertAt = afterStyle !== -1 ? afterStyle + 2 : pPrOpen !== -1 ? pPrOpen + 1 : -1
+  if (insertAt === -1) return `<w:pPr>${num}</w:pPr>`
+  return stripped.slice(0, insertAt) + num + stripped.slice(insertAt)
+}
+
+/** Set or clear the left indent on the paragraph's w:ind (other w:ind
+ * attributes survive). Word prefers a character-unit left indent, own or from
+ * the style chain, over the twips twin, so a twips write also pins
+ * w:leftChars="0" the way Word itself writes pt indents. CT_PPr places ind
+ * before jc and the paragraph-mark rPr. */
+function pPrWithIndLeft(pPr: string, left: number | null): string {
+  let out = pPr.replace(/<w:pPr([^>]*)\/>/, '<w:pPr$1></w:pPr>')
+  const value = left == null ? '' : ` w:left="${left}" w:leftChars="0"`
+  const ind = /<w:ind\b([^>]*)\/>/.exec(out)
+  if (ind) {
+    const attrs = ind[1].replace(/\s+w:(left|start|leftChars|startChars)="[^"]*"/g, '')
+    const next = `${attrs}${value}`
+    out = out.replace(ind[0], next.trim() ? `<w:ind${next}/>` : '')
+  } else if (left != null) {
+    const tag = `<w:ind${value}/>`
+    if (!out) return `<w:pPr>${tag}</w:pPr>`
+    const at = [out.indexOf('<w:jc '), out.indexOf('<w:rPr')].filter((i) => i !== -1)
+    const insertAt = at.length ? Math.min(...at) : out.lastIndexOf('</w:pPr>')
+    out = out.slice(0, insertAt) + tag + out.slice(insertAt)
+  }
+  return out === '<w:pPr></w:pPr>' ? '' : out
+}
+
 function pPrWithJc(pPr: string, align: TextboxParaPatch['align']): string {
   const out = pPr.replace(/<w:pPr([^>]*)\/>/, '<w:pPr$1></w:pPr>').replace(/<w:jc [^>]*\/>/, '')
   const jcVal = align === 'justify' ? 'both' : align
@@ -846,6 +914,8 @@ function patchTxbxContent(
     }
     const template = originals[Math.min(i, originals.length - 1)]
     let pPr = /<w:pPr[\s\S]*?<\/w:pPr>|<w:pPr[^>]*\/>/.exec(template)?.[0] ?? ''
+    if (patch.numPr !== undefined) pPr = pPrWithNumPr(pPr, patch.numPr)
+    if (patch.indentLeft !== undefined) pPr = pPrWithIndLeft(pPr, patch.indentLeft)
     if (patch.align !== undefined) pPr = pPrWithJc(pPr, patch.align)
     // no rel allocation inside textboxes: only links that already have an rId
     // survive re-generation, new links degrade to plain text
@@ -932,7 +1002,10 @@ function injectShapeText(
         shapeXml.slice(content.end)
     } else {
       const body = entry.paras
-        .map((p) => `<w:p>${pPrWithJc('', p.align)}${runsXml(p.runs, null)}</w:p>`)
+        .map(
+          (p) =>
+            `<w:p>${pPrWithJc(pPrWithIndLeft('', p.indentLeft ?? null), p.align)}${runsXml(p.runs, null)}</w:p>`,
+        )
         .join('')
       const txbx = `<wps:txbx><w:txbxContent>${body}</w:txbxContent></wps:txbx>`
       const bodyPrAt = shapeXml.search(/<wps:bodyPr[\s/>]/)
@@ -1114,6 +1187,54 @@ export interface ShapeStylePatch {
   fillHex?: string | null
   /** outline color hex without '#'; null = no outline; undefined = keep */
   borderHex?: string | null
+  /** rotation in degrees clockwise; null or 0 clears a:xfrm@rot; undefined = keep */
+  rotDeg?: number | null
+  /** outline width in CSS px (a:ln@w = px * 9525 EMU); null clears the attribute; undefined = keep */
+  borderWidthPx?: number | null
+}
+
+/**
+ * Write a:xfrm@rot (60000ths of a degree clockwise) on a wps:spPr slice.
+ * null / 0 removes the attribute so Word saves a clean shape; a slice with no
+ * xfrm gets a bare one inserted in its schema position (xfrm comes first).
+ */
+function patchShapeRotation(spPr: string, rotDeg: number | null): string {
+  const norm = rotDeg == null ? 0 : ((rotDeg % 360) + 360) % 360
+  // 360deg wraps to 0: never write a full turn
+  const emu = Math.round(norm * 60000) % 21600000
+  const xfrm = /<a:xfrm\b[^>]*>/.exec(spPr)
+  if (!xfrm) {
+    if (emu === 0) return spPr
+    return spPr.replace(/^(<wps:spPr\b[^>]*>)/, `$1<a:xfrm rot="${emu}"/>`)
+  }
+  const tag =
+    emu === 0
+      ? xfrm[0].replace(/\s+rot="[^"]*"/, '')
+      : /\brot="/.test(xfrm[0])
+        ? xfrm[0].replace(/\brot="[^"]*"/, `rot="${emu}"`)
+        : xfrm[0].replace(/^<a:xfrm\b/, `<a:xfrm rot="${emu}"`)
+  return spPr.replace(xfrm[0], tag)
+}
+
+/**
+ * Write a:ln@w (EMU) on a wps:spPr slice. null removes the attribute (Word's
+ * own default hairline) and a slice with no a:ln gets one appended in its
+ * schema position, after the fill and before any effects.
+ */
+function patchShapeLineWidth(spPr: string, borderWidthPx: number | null): string {
+  const emu = borderWidthPx == null ? null : Math.max(1, Math.round(borderWidthPx * EMU_PER_PX))
+  const ln = /<a:ln\b[^>]*>/.exec(spPr)
+  if (!ln) {
+    if (emu === null) return spPr
+    return spPr.replace('</wps:spPr>', `<a:ln w="${emu}"/></wps:spPr>`)
+  }
+  const tag =
+    emu === null
+      ? ln[0].replace(/\s+w="[^"]*"/, '')
+      : /\bw="/.test(ln[0])
+        ? ln[0].replace(/\bw="[^"]*"/, `w="${emu}"`)
+        : ln[0].replace(/^<a:ln\b/, `<a:ln w="${emu}"`)
+  return spPr.replace(ln[0], tag)
 }
 
 /** Replace the first fill slot (a:solidFill/a:noFill) inside an XML slice. */
@@ -1131,7 +1252,16 @@ export function patchShapeStyles(
   paragraphXml: string,
   styles: ReadonlyArray<ShapeStylePatch | null | undefined>,
 ): string {
-  if (styles.every((s) => s == null || (s.fillHex === undefined && s.borderHex === undefined)))
+  if (
+    styles.every(
+      (s) =>
+        s == null ||
+        (s.fillHex === undefined &&
+          s.borderHex === undefined &&
+          s.rotDeg === undefined &&
+          s.borderWidthPx === undefined),
+    )
+  )
     return paragraphXml
   const drawings = xmlSegments(paragraphXml, 'w:drawing', 0, paragraphXml.length)
   let out = ''
@@ -1142,7 +1272,14 @@ export function patchShapeStyles(
     if (!isBoxDrawing(drawingXml)) continue
     boxIndex++
     const style = styles[boxIndex]
-    if (!style || (style.fillHex === undefined && style.borderHex === undefined)) continue
+    if (
+      !style ||
+      (style.fillHex === undefined &&
+        style.borderHex === undefined &&
+        style.rotDeg === undefined &&
+        style.borderWidthPx === undefined)
+    )
+      continue
     const spPrMatch = /<wps:spPr>[\s\S]*?<\/wps:spPr>/.exec(drawingXml)
     if (spPrMatch) {
       let spPr = spPrMatch[0]
@@ -1164,6 +1301,8 @@ export function patchShapeStyles(
           )
         }
       }
+      if (style.rotDeg !== undefined) spPr = patchShapeRotation(spPr, style.rotDeg)
+      if (style.borderWidthPx !== undefined) spPr = patchShapeLineWidth(spPr, style.borderWidthPx)
       drawingXml = drawingXml.replace(spPrMatch[0], spPr)
     }
     out += paragraphXml.slice(cursor, drawing.start) + drawingXml
@@ -1395,7 +1534,8 @@ function formatPPrChildren(format: ParaFormat | undefined): PPrChild[] {
   if (format.align) {
     let jc: string = format.align === 'justify' ? 'both' : format.align
     // convert visual value back to Word's logical value (inverse of the parse side)
-    if (format.bidi && (jc === 'left' || jc === 'right')) jc = jc === 'left' ? 'right' : 'left'
+    if ((format.bidi || format.bidiInherited) && (jc === 'left' || jc === 'right'))
+      jc = jc === 'left' ? 'right' : 'left'
     out.push({ name: 'w:jc', xml: `<w:jc w:val="${jc}"/>` })
   }
   // rel stops (w:ptab mirrors) and style-inherited stops are display-only: never written into w:tabs
@@ -1705,7 +1845,7 @@ function pprGroupUnchanged(
     case 'w:jc': {
       const val = rawAttr(raw, 'w:val')
       let rawAlign = val ? JC_TO_ALIGN[val] : undefined
-      if (f.bidi && (rawAlign === 'left' || rawAlign === 'right')) {
+      if ((f.bidi || f.bidiInherited) && (rawAlign === 'left' || rawAlign === 'right')) {
         rawAlign = rawAlign === 'left' ? 'right' : 'left'
       }
       return rawAlign === f.align
@@ -1757,10 +1897,119 @@ function pprGroupUnchanged(
  * (character-unit indents resolved at parse time), and its `charIndents` say
  * which cancel attributes an indent edit has to write.
  */
+/** pPr groups a header/footer cell paragraph models, by the format fields that feed them */
+const CELL_PPR_GROUPS: Array<[tag: string, fields: Array<keyof ParaFormat>]> = [
+  ['w:jc', ['align']],
+  ['w:spacing', ['spaceBefore', 'spaceAfter', 'lineSpacing', 'lineRule', 'lineRawTwips']],
+  ['w:ind', ['indentLeft', 'indentFirstLine']],
+  ['w:tabs', ['tabStops']],
+]
+
+/** attributes of w:ind / w:spacing the cell model drives, by group with the
+ *  ParaFormat fields that drive it: only a group whose fields changed is rebuilt
+ *  (a cleared field goes away with its character-unit and autospacing twins);
+ *  the other groups, and attributes outside any group (right indent, …), keep
+ *  their raw value — the parser drops explicit zeros, so an untouched
+ *  `w:after="0"` must never be regenerated from the model */
+const CELL_MODELED_ATTR_GROUPS: Record<
+  string,
+  Array<{ attrs: string[]; fields: Array<keyof ParaFormat> }>
+> = {
+  'w:ind': [
+    { attrs: ['w:left', 'w:start', 'w:leftChars', 'w:startChars'], fields: ['indentLeft'] },
+    {
+      attrs: ['w:firstLine', 'w:hanging', 'w:firstLineChars', 'w:hangingChars'],
+      fields: ['indentFirstLine'],
+    },
+  ],
+  'w:spacing': [
+    { attrs: ['w:before', 'w:beforeLines', 'w:beforeAutospacing'], fields: ['spaceBefore'] },
+    { attrs: ['w:after', 'w:afterLines', 'w:afterAutospacing'], fields: ['spaceAfter'] },
+    { attrs: ['w:line', 'w:lineRule'], fields: ['lineSpacing', 'lineRule', 'lineRawTwips'] },
+  ],
+}
+
+function elementAttrs(xml: string): Array<[string, string]> {
+  return [...xml.matchAll(/([\w:]+)="([^"]*)"/g)].map((m) => [m[1], m[2]])
+}
+
+/** replace one self-closing pPr child by attribute merge: the groups in
+ *  `rebuilt` come from `freshEl` (absent group = cleared), everything else keeps
+ *  its raw value; an element left without attributes is dropped, a new one lands
+ *  in schema order */
+function mergeCellElementAttrs(
+  pPr: string,
+  tag: string,
+  freshEl: string | undefined,
+  rebuilt: ReadonlySet<string>,
+): string {
+  const elRe = new RegExp(`<${tag}(?:\\s[^>]*)?/>`)
+  const rawEl = elRe.exec(pPr)?.[0]
+  const fresh = elementAttrs(freshEl ?? '').filter(([n]) => rebuilt.has(n))
+  const freshNames = new Set(fresh.map(([n]) => n))
+  const kept = elementAttrs(rawEl ?? '').filter(([n]) => !rebuilt.has(n) && !freshNames.has(n))
+  const attrs = [...fresh, ...kept]
+  if (attrs.length === 0) return rawEl ? pPr.replace(rawEl, '') : pPr
+  const merged = `<${tag} ${attrs.map(([n, v]) => `${n}="${v}"`).join(' ')}/>`
+  if (rawEl) return pPr.replace(rawEl, merged)
+  const open = /^<w:pPr(?: [^>]*)?>/.exec(pPr)?.[0] ?? '<w:pPr>'
+  const inner = pPr.startsWith(open) ? pPr.slice(open.length, pPr.length - '</w:pPr>'.length) : ''
+  const rank = (n: string) => PPR_CHILD_ORDER.indexOf(n)
+  const children = splitXmlChildren(inner).map((c) => c.xml)
+  const names = splitXmlChildren(inner).map((c) => c.name)
+  let at = children.length
+  for (let i = 0; i < names.length; i++) {
+    if (rank(names[i]) > rank(tag)) {
+      at = i
+      break
+    }
+  }
+  children.splice(at, 0, merged)
+  return `${open}${children.join('')}</w:pPr>`
+}
+
+/**
+ * Paragraph format edit inside a layout-table cell: only the groups whose
+ * fields differ from `original` are rewritten, so unmodeled pPr children
+ * (bidi, borders, shading, page break) and style-resolved values the editor
+ * merely reports stay as they were. w:jc / w:tabs go through mergePPrFormat;
+ * w:ind / w:spacing merge attribute-wise so their unmodeled attributes survive.
+ */
+export function mergeCellParaFormat(
+  rawPPr: string,
+  format: ParaFormat,
+  original: ParaFormat | undefined,
+): string {
+  const differs = (k: keyof ParaFormat) =>
+    JSON.stringify(format[k] ?? null) !== JSON.stringify(original?.[k] ?? null)
+  const tags = new Set(CELL_PPR_GROUPS.filter(([, f]) => f.some(differs)).map(([tag]) => tag))
+  if (tags.size === 0) return rawPPr
+  let out = !rawPPr || /^<w:pPr(?:\s[^>]*)?\/>$/.test(rawPPr) ? '<w:pPr></w:pPr>' : rawPPr
+  const realStops = (format.tabStops ?? []).filter((ts) => !ts.rel && !ts.inherited)
+  if (tags.has('w:tabs') && realStops.length === 0) {
+    // mergePPrFormat only manages w:tabs while stops exist: clearing them all is done here
+    out = out.replace(/<w:tabs>[\s\S]*?<\/w:tabs>|<w:tabs\/>/, '')
+    tags.delete('w:tabs')
+  }
+  const viaMerge = new Set([...tags].filter((t) => t === 'w:jc' || t === 'w:tabs'))
+  if (viaMerge.size > 0) out = mergePPrFormat(out, format, undefined, viaMerge) || '<w:pPr></w:pPr>'
+  const fresh = formatPPrChildren(format)
+  for (const tag of ['w:spacing', 'w:ind']) {
+    if (!tags.has(tag)) continue
+    const rebuilt = new Set(
+      CELL_MODELED_ATTR_GROUPS[tag].filter((g) => g.fields.some(differs)).flatMap((g) => g.attrs),
+    )
+    out = mergeCellElementAttrs(out, tag, fresh.find((c) => c.name === tag)?.xml, rebuilt)
+  }
+  return /^<w:pPr(?: [^>]*)?><\/w:pPr>$/.test(out) ? '' : out
+}
+
 export function mergePPrFormat(
   rawPPr: string,
   format: ParaFormat | undefined,
   original?: ParaFormat,
+  /** restrict the managed groups (others keep their raw bytes whatever the format says) */
+  onlyTags?: ReadonlySet<string>,
 ): string {
   const open = /^<w:pPr(?: [^>]*)?>/.exec(rawPPr)?.[0]
   const fresh = formatPPrChildren(format)
@@ -1801,6 +2050,7 @@ export function mergePPrFormat(
   if (format?.textDirection !== undefined) managedTags.add('w:textDirection')
   // only when the model carries a size: otherwise the paragraph-mark rPr stays unmanaged
   if (format?.emptyRunSizeHalfPoints !== undefined) managedTags.add('w:rPr')
+  if (onlyTags) for (const tag of [...managedTags]) if (!onlyTags.has(tag)) managedTags.delete(tag)
   const rawChildren = splitXmlChildren(inner)
   const rawOf = (tag: string) => rawChildren.find((c) => c.name === tag)?.xml
   const rebuilt = new Set(
@@ -1859,6 +2109,45 @@ export function stripParaMarkColor(rawPPr: string): string {
   return stripped + tail
 }
 
+/**
+ * w:del / w:ins marker for a paragraph mark the editor tracked ('' when the
+ * record is absent or malformed). Without an allocator the id is left empty
+ * for fillRevisionIds to mint at save, like row/cell revisions.
+ */
+export function paraMarkRevisionXml(
+  kind: 'del' | 'ins',
+  record: string | null | undefined,
+  mintId: () => string = () => '',
+): string {
+  if (!record) return ''
+  try {
+    const info = JSON.parse(record) as { author?: string; date?: string }
+    const date = info.date ? ` w:date="${escapeXmlAttr(info.date)}"` : ''
+    return `<w:${kind} w:id="${mintId()}" w:author="${escapeXmlAttr(info.author ?? '')}"${date}/>`
+  } catch {
+    return ''
+  }
+}
+
+/** add a tracked paragraph-mark marker to raw pPr bytes (the mark's rPr opens with the revision markers) */
+export function setParaMarkRevision(rawPPr: string, markerXml: string): string {
+  if (!markerXml) return rawPPr
+  const changeStart = rawPPr.indexOf('<w:pPrChange')
+  let live = changeStart === -1 ? rawPPr : rawPPr.slice(0, changeStart)
+  const tail = changeStart === -1 ? '' : rawPPr.slice(changeStart)
+  if (!live || /^<w:pPr(?:\s[^>]*)?\/>$/.test(live)) live = '<w:pPr></w:pPr>'
+  if (/<w:rPr\/>/.test(live)) live = live.replace(/<w:rPr\/>/, `<w:rPr>${markerXml}</w:rPr>`)
+  else if (live.includes('<w:rPr>')) live = live.replace('<w:rPr>', `<w:rPr>${markerXml}`)
+  else {
+    const rPr = `<w:rPr>${markerXml}</w:rPr>`
+    const sectAt = live.indexOf('<w:sectPr')
+    if (sectAt !== -1) live = live.slice(0, sectAt) + rPr + live.slice(sectAt)
+    else if (live.endsWith('</w:pPr>')) live = live.slice(0, -'</w:pPr>'.length) + rPr + '</w:pPr>'
+    else live += rPr
+  }
+  return live + tail
+}
+
 /** drop the paragraph mark's tracked w:del / w:ins record (pPr/rPr) once the revision is accepted or rejected */
 export function stripParaMarkRevision(rawPPr: string, kind: 'del' | 'ins'): string {
   const changeStart = rawPPr.indexOf('<w:pPrChange')
@@ -1870,6 +2159,39 @@ export function stripParaMarkRevision(rawPPr: string, kind: 'del' | 'ins'): stri
     return rest.trim() ? `<w:rPr>${rest}</w:rPr>` : ''
   })
   return stripped + tail
+}
+
+/**
+ * Resolve the paragraph mark's tracked formatting change (pPr/rPr/rPrChange):
+ * accept drops the record, reject puts the recorded old rPr back (the mark's
+ * own ins/del/move markers stay).
+ */
+export function resolveParaMarkRPrChange(rawPPr: string, mode: 'accept' | 'reject'): string {
+  const changeStart = rawPPr.indexOf('<w:pPrChange')
+  const live = changeStart === -1 ? rawPPr : rawPPr.slice(0, changeStart)
+  const tail = changeStart === -1 ? '' : rawPPr.slice(changeStart)
+  const open = live.indexOf('<w:rPr>')
+  const recordAt = live.indexOf('<w:rPrChange', open)
+  if (open === -1 || recordAt === -1) return rawPPr
+  // the record nests its own <w:rPr>, so the mark's rPr closes after the record does
+  const selfClosing = /^<w:rPrChange\b[^>]*\/>/.exec(live.slice(recordAt))
+  const closeTag = live.indexOf('</w:rPrChange>', recordAt)
+  if (!selfClosing && closeTag === -1) return rawPPr
+  const recordEnd = selfClosing
+    ? recordAt + selfClosing[0].length
+    : closeTag + '</w:rPrChange>'.length
+  const close = live.indexOf('</w:rPr>', recordEnd)
+  if (close === -1) return rawPPr
+  const record = live.slice(recordAt, recordEnd)
+  const rest = live.slice(open + '<w:rPr>'.length, recordAt) + live.slice(recordEnd, close)
+  let next = rest
+  if (mode === 'reject') {
+    const markers = rest.match(/<w:(?:ins|del|moveFrom|moveTo)\b[^>]*\/>/g)?.join('') ?? ''
+    const old = /<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(record)?.[1] ?? ''
+    next = markers + old
+  }
+  const rPr = next.trim() ? `<w:rPr>${next}</w:rPr>` : ''
+  return live.slice(0, open) + rPr + live.slice(close + '</w:rPr>'.length) + tail
 }
 
 export function stripPPrChange(rawPPr: string): string {
@@ -1982,6 +2304,14 @@ export function generateParagraphXml(block: GeneratedBlock, ctx: GenerateContext
     const revision = revisionPPrChangeXml(block.pPrChange)
     if (revision) children.push({ name: 'w:pPrChange', xml: revision })
   }
+  const markRevision =
+    paraMarkRevisionXml('del', block.paraMarkDel, ctx.allocateRevisionId) +
+    paraMarkRevisionXml('ins', block.paraMarkIns, ctx.allocateRevisionId)
+  if (markRevision) {
+    const rPr = children.find((c) => c.name === 'w:rPr')
+    if (rPr) rPr.xml = rPr.xml.replace('<w:rPr>', `<w:rPr>${markRevision}`)
+    else children.push({ name: 'w:rPr', xml: `<w:rPr>${markRevision}</w:rPr>` })
+  }
   children.sort((a, b) => PPR_CHILD_ORDER.indexOf(a.name) - PPR_CHILD_ORDER.indexOf(b.name))
   const pPr = children.length > 0 ? `<w:pPr>${children.map((c) => c.xml).join('')}</w:pPr>` : ''
   return `<w:p>${pPr}${content}</w:p>`
@@ -2034,6 +2364,10 @@ const TCPR_ORDER = [
   'w:tcFitText',
   'w:vAlign',
   'w:hideMark',
+  'w:cellIns',
+  'w:cellDel',
+  'w:cellMerge',
+  'w:tcPrChange',
 ]
 
 /** Replace/insert/delete a tcPr child in schema order (xml=null deletes) */
@@ -2094,6 +2428,26 @@ function cellSpan(cell: TableCell): number {
   return Math.min(Math.max(1, Math.floor(span)), 1000)
 }
 
+/** a property-change record the editor resolved: null = accepted, else its `resolved` verdict */
+function resolvedProps(
+  xml: string,
+  changeName: string,
+  change: PropChangeInfo | null | undefined,
+): string {
+  const mode = change === null ? 'accept' : change?.resolved
+  return mode ? resolvePropChangeXml(xml, changeName, mode) : xml
+}
+
+function cellMergeXml(record: PropChangeInfo): string {
+  const attr = (name: string, value: string | undefined) =>
+    value === undefined ? '' : ` ${name}="${escapeXmlAttr(value)}"`
+  return (
+    `<w:cellMerge${attr('w:id', record.id ?? '0')}${attr('w:author', record.author)}` +
+    `${attr('w:date', record.date)}${attr('w16du:dateUtc', record.dateUtc)}` +
+    `${attr('w:vMerge', record.vMerge ?? 'cont')}${attr('w:vMergeOrig', record.vMergeOrig)}/>`
+  )
+}
+
 function tableCellXml(
   cell: TableCell,
   width: number,
@@ -2101,11 +2455,15 @@ function tableCellXml(
 ): string {
   // Surgical rawTcPr patch: modeled children are replaced/inserted in schema order;
   // unmodeled ones (tcMar/textDirection/noWrap…) keep their original bytes
-  const rawInner = cell.rawTcPr
-    ? cell.rawTcPr.replace(/^<w:tcPr(?:\s[^>]*)?>/, '').replace(/<\/w:tcPr>$/, '')
+  const rawTcPr = cell.rawTcPr
+    ? resolvedProps(
+        resolvedProps(cell.rawTcPr, 'w:tcPrChange', cell.tcPrChange),
+        'w:cellMerge',
+        cell.cellMerge,
+      )
     : ''
-  const children: PPrChild[] =
-    cell.rawTcPr && cell.rawTcPr.endsWith('</w:tcPr>') ? splitXmlChildren(rawInner) : []
+  const rawInner = rawTcPr.replace(/^<w:tcPr(?:\s[^>]*)?>/, '').replace(/<\/w:tcPr>$/, '')
+  const children: PPrChild[] = rawTcPr.endsWith('</w:tcPr>') ? splitXmlChildren(rawInner) : []
   setTcPrChild(children, 'w:tcW', `<w:tcW w:w="${width}" w:type="dxa"/>`)
   const span = cellSpan(cell)
   setTcPrChild(children, 'w:gridSpan', span > 1 ? `<w:gridSpan w:val="${span}"/>` : null)
@@ -2119,6 +2477,10 @@ function tableCellXml(
         ? '<w:vMerge/>'
         : null,
   )
+  // a merged-away cell rebuilt from its restart cell's bytes lost the merge record it carried
+  const cellMerge = cell.cellMerge
+  if (cellMerge && !cellMerge.resolved && merge === 'continue' && !rawTcPr.includes('<w:cellMerge'))
+    setTcPrChild(children, 'w:cellMerge', cellMergeXml(cellMerge))
   // With borders unmodeled (undefined), leave the raw tcBorders alone; clearing borders
   // uses explicit none
   if (cell.borders) setTcPrChild(children, 'w:tcBorders', cellBordersXml(cell.borders))
@@ -2235,6 +2597,17 @@ function tableLookXml(look: NonNullable<TableModel['tableLook']>): string {
   )
 }
 
+/** the table's own <w:tblPr> (depth-aware: a w:tblPrChange nests another tblPr inside it) */
+function originalTblPrOf(tableXml: string): string | undefined {
+  const open = /<w:tbl[\s>]/.exec(tableXml)
+  if (!open) return undefined
+  const innerStart = tableXml.indexOf('>', open.index) + 1
+  const innerEnd = tableXml.lastIndexOf('</w:tbl>')
+  if (innerStart <= 0 || innerEnd < innerStart) return undefined
+  return splitXmlChildren(tableXml.slice(innerStart, innerEnd)).find((c) => c.name === 'w:tblPr')
+    ?.xml
+}
+
 export function generateTableModelXml(model: TableModel, originalTableXml?: string): string {
   // the widest row decides the column count; folding it in a loop keeps the
   // argument count off the call (a spread here blew the stack past ~125k rows)
@@ -2282,7 +2655,12 @@ export function generateTableModelXml(model: TableModel, originalTableXml?: stri
         .join('') +
       '</w:tblCellMar>'
     : ''
-  const grid = `<w:tblGrid>${widths.map((width) => `<w:gridCol w:w="${width}"/>`).join('')}</w:tblGrid>`
+  const gridChange = model.tblGridChange
+  const gridRecord =
+    gridChange && !gridChange.resolved
+      ? `<w:tblGridChange w:id="${escapeXmlAttr(gridChange.id ?? '0')}"><w:tblGrid>${gridChange.oldXml ?? ''}</w:tblGrid></w:tblGridChange>`
+      : ''
+  const grid = `<w:tblGrid>${widths.map((width) => `<w:gridCol w:w="${width}"/>`).join('')}${gridRecord}</w:tblGrid>`
   const rows = model.rows
     .map((row, ri) => {
       let gridColumn = 0
@@ -2310,8 +2688,14 @@ export function generateTableModelXml(model: TableModel, originalTableXml?: stri
       }
       // trPr: original bytes passed through (tblHeader/cantSplit etc.); row height is
       // replaced/inserted/removed per the model
-      let trPr = model.rawTrPrs?.[ri] ?? ''
+      let trPr = resolvedProps(model.rawTrPrs?.[ri] ?? '', 'w:trPrChange', model.rowPrChanges?.[ri])
       if (trPr && !trPr.endsWith('</w:trPr>')) trPr = ''
+      let tblPrEx = resolvedProps(
+        model.rawTblPrExs?.[ri] ?? '',
+        'w:tblPrExChange',
+        model.rowTblPrExChanges?.[ri],
+      )
+      if (tblPrEx && !tblPrEx.endsWith('</w:tblPrEx>')) tblPrEx = ''
       // the placeholders are the truth for the grid edges: stale raw edge tags go, the
       // computed ones lead the trPr (CT_TrPr order: cnfStyle, divId, gridBefore, gridAfter, wBefore, wAfter, …)
       trPr = trPr.replace(/<w:(?:gridBefore|gridAfter|wBefore|wAfter)\b[^>]*\/>/g, '')
@@ -2363,19 +2747,20 @@ export function generateTableModelXml(model: TableModel, originalTableXml?: stri
         trPr = trPr.replace(/<w:trHeight[^>]*\/>/, '')
         if (/^<w:trPr(?:\s[^>]*)?>\s*<\/w:trPr>$/.test(trPr)) trPr = ''
       }
-      return `<w:tr>${trPr}${cells.join('')}</w:tr>`
+      return `<w:tr>${tblPrEx}${trPr}${cells.join('')}</w:tr>`
     })
     .join('')
-  const originalTblPr = originalTableXml?.match(
-    /<w:tblPr(?:\s[^>]*)?>[\s\S]*?<\/w:tblPr>|<w:tblPr(?:\s[^>]*)?\/>/,
-  )?.[0]
+  const originalTblPr = originalTableXml ? originalTblPrOf(originalTableXml) : undefined
   const tblInd =
     model.indentTwips && Math.round(model.indentTwips) !== 0
       ? `<w:tblInd w:w="${Math.round(model.indentTwips)}" w:type="dxa"/>`
       : ''
-  let tblPr =
+  let tblPr = resolvedProps(
     originalTblPr ??
-    `<w:tblPr><w:tblW w:w="${totalWidth}" w:type="dxa"/>${tblInd}${borders}</w:tblPr>`
+      `<w:tblPr><w:tblW w:w="${totalWidth}" w:type="dxa"/>${tblInd}${borders}</w:tblPr>`,
+    'w:tblPrChange',
+    model.tblPrChange,
+  )
   // Table style reference: '' = remove, non-empty = replace/insert (tblStyle is the
   // first tblPr child)
   if (model.tblStyleId !== undefined) {
@@ -2492,6 +2877,39 @@ export interface InlinePictureXmlOptions {
   rotDeg?: number
   flipH?: boolean
   flipV?: boolean
+}
+
+/** The drawing re-sized to widthPx x heightPx: wp:extent and the picture's own
+ *  a:ext follow (effectExtent is left alone). Unchanged when the extent already
+ *  reads these sizes, so an untouched picture saves byte-identical. */
+export function resizeInlinePictureXml(xml: string, widthPx: number, heightPx: number): string {
+  if (!/<wp:inline[\s>]/.test(xml)) return xml
+  return resizeDrawingExtents(xml, widthPx, heightPx)
+}
+
+/** resizeInlinePictureXml for a floating (wp:anchor) run picture; only a lone
+ *  picture: a group's extent does not follow its first picture */
+export function resizeAnchoredPictureXml(xml: string, widthPx: number, heightPx: number): string {
+  if (!/<wp:anchor[\s>]/.test(xml) || /<wpg:/.test(xml)) return xml
+  if ((xml.match(/<pic:pic[\s>]/g) ?? []).length !== 1) return xml
+  return resizeDrawingExtents(xml, widthPx, heightPx)
+}
+
+function resizeDrawingExtents(xml: string, widthPx: number, heightPx: number): string {
+  if (!(widthPx > 0) || !(heightPx > 0)) return xml
+  const cx = Math.max(1, Math.round(widthPx * EMU_PER_PX))
+  const cy = Math.max(1, Math.round(heightPx * EMU_PER_PX))
+  const extent = /<wp:extent\b[^>]*\bcx="(\d+)"[^>]*\bcy="(\d+)"/.exec(xml)
+  if (!extent) return xml
+  const samePx = (emu: string, px: number) =>
+    Math.round((Number(emu) / EMU_PER_PX) * 100) / 100 === px
+  if (samePx(extent[1], widthPx) && samePx(extent[2], heightPx)) return xml
+  const ext = (tag: string) =>
+    tag.replace(/\bcx="\d+"/, `cx="${cx}"`).replace(/\bcy="\d+"/, `cy="${cy}"`)
+  let out = xml.replace(/<wp:extent\b[^>]*>/, ext)
+  const pic = /<pic:spPr[\s>][\s\S]*?<\/pic:spPr>/.exec(out)
+  if (pic) out = out.replace(pic[0], pic[0].replace(/<a:ext\b[^>]*>/, ext))
+  return out
 }
 
 /** `<w:drawing>` of an inline picture (wp:inline + pic:pic), the run and paragraph excluded */
@@ -2755,10 +3173,12 @@ function runsXml(
           r.ins?.date ?? null,
           r.ins?.dateUtc ?? null,
           r.ins?.id ?? null,
+          r.ins?.move ?? null,
           r.del?.author ?? null,
           r.del?.date ?? null,
           r.del?.dateUtc ?? null,
           r.del?.id ?? null,
+          r.del?.move ?? null,
         ])
       : ''
   let revSeq = 9001
@@ -2777,6 +3197,17 @@ function runsXml(
     (info.date ? ` w:date="${escapeXmlAttr(info.date)}"` : '') +
     (info.dateUtc ? ` w16du:dateUtc="${escapeXmlAttr(info.dateUtc)}"` : '')
 
+  // a move wraps its runs in w:moveFrom / w:moveTo inside a named range
+  // (w:moveFromRangeStart .. End); the twin side carries the same w:name
+  const moveOf = (r: Run | undefined): { side: 'From' | 'To'; name: string } | null =>
+    r?.del?.move
+      ? { side: 'From', name: r.del.move }
+      : r?.ins?.move
+        ? { side: 'To', name: r.ins.move }
+        : null
+  const sameMove = (a: ReturnType<typeof moveOf>, b: ReturnType<typeof moveOf>) =>
+    !!a && !!b && a.side === b.side && a.name === b.name
+  let openRange: { side: 'From' | 'To'; id: string } | null = null
   let g = 0
   while (g < runs.length) {
     const key = revKey(runs[g])
@@ -2786,11 +3217,29 @@ function runsXml(
       emitRange(g, end)
     } else {
       const { ins, del } = runs[g]
-      if (ins) parts.push(`<w:ins${revAttrs(ins)}>`)
-      if (del) parts.push(`<w:del${revAttrs(del)}>`)
+      const move = moveOf(runs[g])
+      if (move && !sameMove(move, moveOf(runs[g - 1]))) {
+        const info = move.side === 'From' ? del! : ins!
+        const id = mintRevisionId()
+        parts.push(
+          `<w:move${move.side}RangeStart w:id="${escapeXmlAttr(id)}"` +
+            ` w:author="${escapeXmlAttr(info.author)}"` +
+            (info.date ? ` w:date="${escapeXmlAttr(info.date)}"` : '') +
+            ` w:name="${escapeXmlAttr(move.name)}"/>`,
+        )
+        openRange = { side: move.side, id }
+      }
+      const insTag = ins?.move ? 'w:moveTo' : 'w:ins'
+      const delTag = del?.move ? 'w:moveFrom' : 'w:del'
+      if (ins) parts.push(`<${insTag}${revAttrs(ins)}>`)
+      if (del) parts.push(`<${delTag}${revAttrs(del)}>`)
       emitRange(g, end)
-      if (del) parts.push('</w:del>')
-      if (ins) parts.push('</w:ins>')
+      if (del) parts.push(`</${delTag}>`)
+      if (ins) parts.push(`</${insTag}>`)
+      if (openRange && !sameMove(move, moveOf(runs[end]))) {
+        parts.push(`<w:move${openRange.side}RangeEnd w:id="${escapeXmlAttr(openRange.id)}"/>`)
+        openRange = null
+      }
     }
     g = end
   }
@@ -2825,7 +3274,9 @@ function splitGlyphRuns(
 function runFragmentXml(run: Run, insideLink: boolean): string {
   // atomic inline formula: the stored <m:oMath> fragment is already valid
   // paragraph content (patch.ts adds the xmlns:m declaration when missing)
-  if (run.math) return run.math.omml
+  if (run.math) {
+    return run.math.display ? `<m:oMathPara>${run.math.omml}</m:oMathPara>` : run.math.omml
+  }
   // atomic phonetic guide: the exact <w:ruby> fragment re-wrapped in a run
   if (run.ruby) return `<w:r>${run.ruby.xml}</w:r>`
   // atomic cell picture: the exact <w:drawing> fragment re-wrapped in a run
@@ -3108,6 +3559,15 @@ function mergeRFontsXml(rawXml: string, run: Run): string {
 function revisionRPrChangeXml(run: Run): string | null {
   const change = run.rPrChange
   if (!change) return null
+  const attrs =
+    ` w:id="${escapeXmlAttr(change.id ?? '0')}"` +
+    ` w:author="${escapeXmlAttr(change.author)}"` +
+    (change.date ? ` w:date="${escapeXmlAttr(change.date)}"` : '') +
+    (change.dateUtc ? ` w16du:dateUtc="${escapeXmlAttr(change.dateUtc)}"` : '')
+  if (change.oldRPr !== undefined) {
+    const rPr = change.oldRPr ? `<w:rPr>${change.oldRPr}</w:rPr>` : '<w:rPr/>'
+    return `<w:rPrChange${attrs}>${rPr}</w:rPrChange>`
+  }
   const old = change.old ?? {}
   const props: string[] = []
   if (old.styleId) props.push(`<w:rStyle w:val="${escapeXmlAttr(old.styleId)}"/>`)
@@ -3129,11 +3589,6 @@ function revisionRPrChangeXml(run: Run): string | null {
   if (old.highlight) props.push(`<w:highlight w:val="${escapeXmlAttr(old.highlight)}"/>`)
   if (old.underline) props.push('<w:u w:val="single"/>')
   if (old.vertAlign) props.push(`<w:vertAlign w:val="${old.vertAlign}"/>`)
-  const attrs =
-    ` w:id="${escapeXmlAttr(change.id ?? '0')}"` +
-    ` w:author="${escapeXmlAttr(change.author)}"` +
-    (change.date ? ` w:date="${escapeXmlAttr(change.date)}"` : '') +
-    (change.dateUtc ? ` w16du:dateUtc="${escapeXmlAttr(change.dateUtc)}"` : '')
   return `<w:rPrChange${attrs}><w:rPr>${props.join('')}</w:rPr></w:rPrChange>`
 }
 

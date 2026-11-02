@@ -43,6 +43,12 @@ const api: HtmlApi = {
     ipcRenderer.on(HTML_CHANNELS.fileRenamed, listener)
     return () => ipcRenderer.removeListener(HTML_CHANNELS.fileRenamed, listener)
   },
+  onFileChangedOnDisk: (handler) => {
+    const listener = (_e: Electron.IpcRendererEvent, path: string) => handler(path)
+    ipcRenderer.on(HTML_CHANNELS.fileChangedOnDisk, listener)
+    return () => ipcRenderer.removeListener(HTML_CHANNELS.fileChangedOnDisk, listener)
+  },
+  ackFileChangedOnDisk: () => ipcRenderer.send(HTML_CHANNELS.ackFileChangedOnDisk),
   setProvisionalTitle: (title) => ipcRenderer.send(HTML_CHANNELS.provisionalTitle, title),
   pickImage: () => ipcRenderer.invoke(HTML_CHANNELS.pickImage),
   saveImage: (data) => ipcRenderer.invoke(HTML_CHANNELS.saveImage, data),
@@ -106,6 +112,9 @@ const api: HtmlApi = {
     return () => ipcRenderer.removeListener(AI_CHANNELS.settingsChanged, listener)
   },
   openAiModelSettings: () => ipcRenderer.invoke(AI_CHANNELS.openModelSettings),
+  openSkillsSettings: () => ipcRenderer.invoke('ai:open-skills-settings'),
+  skillsList: () => ipcRenderer.invoke('ai:skills-list'),
+  skillText: (name: string) => ipcRenderer.invoke('ai:skill-text', name),
   aiGskStatus: () => ipcRenderer.invoke(AI_CHANNELS.gskStatus),
   aiStream: (request) => ipcRenderer.invoke(AI_CHANNELS.stream, request),
   aiStreamCancel: (requestId) => ipcRenderer.invoke(AI_CHANNELS.streamCancel, requestId),
@@ -129,7 +138,28 @@ const projectApi: Pick<ProjectApi, 'resolveChat' | 'appendChat' | 'loadChat' | '
   rebindChat: (args) => ipcRenderer.invoke('project:rebindChat', args),
 }
 
+/**
+ * Model file naming: the transport half of `suggestFileName`.
+ *
+ * Inlined rather than imported — a preload entry must stay a single-file bundle,
+ * or the sandbox drops every global it exposed. The one `ai:` channel is
+ * registered app-wide by the shell rather than by this app, the same arrangement
+ * the `project:*` bridge below already depends on.
+ *
+ * `content` crosses this bridge verbatim and the main process cannot see what
+ * this editor withheld, so what the caller hands over is exactly what the model
+ * sees. A caller that passed raw document text would undo its own redactions.
+ *
+ * The global is `aiNamingApi`, not `aiOffice`: `aiOffice` is the shell's home
+ * API, and a partial one in an editor window would shadow it there.
+ */
+const aiNamingApi = {
+  suggestFileName: (input: { content: string }) =>
+    ipcRenderer.invoke('ai:suggest-file-name', input),
+}
+
 contextBridge.exposeInMainWorld('htmlApi', api)
+contextBridge.exposeInMainWorld('aiNamingApi', aiNamingApi)
 contextBridge.exposeInMainWorld('projectApi', projectApi)
 
 // open documents dragged from the OS onto this tab as a new shell tab

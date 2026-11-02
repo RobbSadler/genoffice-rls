@@ -107,9 +107,21 @@ body.vib .home {
   flex-direction: column;
   flex-shrink: 0;
   width: 232px;
+  /* a dragged width never crowds the file list out of a narrow window */
+  max-width: 45vw;
   padding: 18px 12px 16px;
   border-right: 1px solid var(--border);
   overflow-y: auto;
+}
+
+/* drag strip straddling the sidebar's right border (genoffice#2169) */
+.sidebar-resizer {
+  flex: none;
+  position: relative;
+  z-index: 2;
+  width: 7px;
+  margin: 0 -4px 0 -3px;
+  cursor: col-resize;
 }
 
 .sidebar-logo {
@@ -1309,7 +1321,8 @@ body.vib .home {
   color: var(--text);
 }
 
-/* fixed-position popup anchored via inline top/right (set at open time) so it
+/* fixed-position popup; left/top are set in a layout effect (placeFolderMenu) so it
+   opens to the right of the pointer and stays inside the viewport, and it
    escapes the scrollable tree without the tree losing overflow-y */
 .folder-menu {
   position: fixed;
@@ -2266,6 +2279,7 @@ html[dir='rtl'] .quick-title-row {
 
 /* ── knowledge-base ask panel ── */
 .kb-ask {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -2362,6 +2376,7 @@ html[dir='rtl'] .quick-title-row {
   color: var(--accent);
   font-size: 11.5px;
   font-weight: 500;
+  line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2373,7 +2388,7 @@ html[dir='rtl'] .quick-title-row {
   font-weight: 500;
   margin: 1px 0 3px;
 }
-.kb-ask-step span {
+.kb-ask-step > div > span {
   font-size: 12px;
   color: var(--text-secondary);
   line-height: 1.5;
@@ -2410,6 +2425,105 @@ html[dir='rtl'] .quick-title-row {
   margin: 0 2px 8px;
   font-size: 12.5px;
   color: var(--text-secondary);
+}
+.kb-ask-notice {
+  margin: 0 2px 8px;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+.kb-ask-dragover > :not(.kb-ask-drop) {
+  pointer-events: none;
+}
+.kb-ask-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 500;
+}
+.kb-ask-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 8px 0;
+}
+.kb-ask-attachments-sent {
+  padding: 0 0 6px;
+}
+.kb-ask-attachment {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  height: 40px;
+  padding: 0 10px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.kb-ask-attachments:not(.kb-ask-attachments-sent) .kb-ask-attachment {
+  padding-right: 22px;
+}
+.kb-ask-attachment-thumb {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+.kb-ask-attachment-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--surface-subtle);
+}
+.kb-ask-attachment-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.kb-ask-attachment-name {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-ask-attachment-size {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.kb-ask-attachment-remove {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-tertiary);
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+.kb-ask-attachment-remove:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 .kb-ask-nosave {
   margin: 0 2px 8px;
@@ -2465,7 +2579,7 @@ html[dir='rtl'] .quick-title-row {
   background: none;
   padding: 0 14px;
   margin: 12px 0 4px;
-  font-size: 16px;
+  font-size: 14px;
   font-family: inherit;
   line-height: 24px;
   outline: none;
@@ -2525,6 +2639,72 @@ html[dir='rtl'] .quick-title-row {
 .kb-ask-tool-note svg {
   color: var(--text-tertiary);
   flex-shrink: 0;
+}
+.kb-ask-tool-detail {
+  color: var(--text);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-ask-tool-count {
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.kb-ask-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+.kb-ask-card-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  font-size: 12.5px;
+}
+.kb-ask-card-name {
+  appearance: none;
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-ask-card-name svg {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+button.kb-ask-card-name {
+  cursor: pointer;
+  color: var(--accent);
+}
+button.kb-ask-card-name:hover {
+  text-decoration: underline;
+}
+.kb-ask-card-status {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.kb-ask-card-error {
+  color: var(--danger);
+}
+.kb-ask-card-row .kb-ask-action {
+  margin-left: 0;
 }
 .kb-ask-actions {
   display: flex;

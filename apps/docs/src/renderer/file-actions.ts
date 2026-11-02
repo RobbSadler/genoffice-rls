@@ -7,6 +7,8 @@
  */
 import type { Editor } from '@tiptap/core'
 import { history } from '@tiptap/pm/history'
+import { suggestFileName } from '@genoffice/ui'
+import { modelTextOf, type RedactableNode } from './ai/redact-view'
 import {
   applyPageNumType,
   applySectionSettings,
@@ -59,12 +61,12 @@ import { parseDocxOffThread } from './parse-off-thread'
 import { PHASED_APPEND } from './editor/streaming-tail-guard'
 import { docTextLength, docWeight, openTierFor } from './large-document'
 import { documentToMarkdown } from './export-markdown'
-import { blocksHaveRevisions } from './editor/revision-view'
-import { docStyleCss } from './doc-style-css'
+import { docBodyEaFont, docStyleCss } from './doc-style-css'
 import { setNoteNumFmts } from './note-format'
 import type { CompareEntry } from './editor/compare'
 import { blocksToPmDoc, pmDocOptions, pmDocToSavePlan, type PmNode } from './editor/convert'
 import { TABLE_TRAILING_SKIP, setLazyMediaHashes } from './editor/extensions'
+import { setStaticAsciiResolver } from './editor/protected-render'
 import { FORMAT_MARKS, serializeMarks } from './editor/caret-marks'
 import { TRACK_IGNORE } from './editor/revisions'
 import {
@@ -91,10 +93,14 @@ import { checkMissingFonts, collectDocFonts } from './font-check'
 import {
   hangulSpaceWideningFor,
   loadBundledStandIns,
+  setAdditiveParagraphSpacing,
   setDocFontTable,
   setHangulSpaceWidening,
+  setLatinViaEastAsiaSlot,
+  latinViaEastAsiaSlotFor,
 } from './line-metrics'
 import { adoptEmbeddedFonts } from './embedded-fonts'
+import { prefetchFaces } from './font-resolve'
 import { defaultEastAsiaFontFor } from './font-list'
 import { clearPrintZoom, setPrintZoom } from './print-zoom'
 import { collectPdfInternalLinks } from './pdf-internal-links'
@@ -200,6 +206,9 @@ export interface FileActionContext {
   setComments: (value: CommentInfo[]) => void
   setCommentsDirty: (dirty: boolean) => void
   setShowComments: (show: boolean) => void
+  /** Contextual mode: the panel hosts threads the margin cannot (unanchored comments) */
+  setCommentPanelOpen: (open: boolean) => void
+  setCommentPopup: (id: string | null) => void
   setCommentComposing: (composing: boolean) => void
   watermark: string | null
   watermarkDirty: boolean
@@ -238,7 +247,10 @@ export interface FileActionContext {
   setThemeFontsDirty: (dirty: boolean) => void
   setThemeColors: (value: ThemeColors | null) => void
   setThemeColorsDirty: (dirty: boolean) => void
+  trackChanges: boolean
   setTrackChanges: (on: boolean) => void
+  trackRevisionsDirty: boolean
+  setTrackRevisionsDirty: (dirty: boolean) => void
   protection: DocProtection | null
   protectionDirty: boolean
   setProtection: (value: DocProtection | null) => void
@@ -253,8 +265,6 @@ export interface FileActionContext {
   setRemovePersonalInfoDirty: (dirty: boolean) => void
   /** document (re)loaded: App resets the modify-password session state and prompts when one is set */
   onWriteProtectionLoaded: (wp: WriteProtection | null) => void
-  /** document opened: Word shows a document with tracked changes in Simple Markup */
-  onRevisionsLoaded: (hasRevisions: boolean) => void
   setCompareResult: (value: { otherName: string; entries: CompareEntry[] } | null) => void
   /** password-protected docx: open the password prompt (decrypt-retry loop lives in App) */
   promptDocxPassword: (info: { path: string; name: string }) => void
@@ -360,11 +370,14 @@ function applyDocLayoutSettings(editor: Editor, parsed: ParsedDocFull): void {
   // Word stretches a justified line that ends in a line break (w:br / w:cr)
   // unless the document opts out with doNotExpandShiftReturn
   editor.storage.justifyShrink.expandBreakLines = parsed.doNotExpandShiftReturn !== true
+  setAdditiveParagraphSpacing(parsed.doNotUseHTMLParagraphAutoSpacing === true)
   editor.storage.cjkPunctShrink.enabled = parsed.compressPunctuation === true
   editor.storage.cjkPunctShrink.hangPunct = parsed.compressPunctuation !== true
   editor.storage.cjkPunctShrink.legacyLayout = (parsed.compatibilityMode ?? 0) < 15
   editor.storage.cjkPunctShrink.docEastAsiaLang = parsed.docDefaults?.eastAsiaLang ?? null
   setHangulSpaceWidening(hangulSpaceWideningFor(parsed))
+  setLatinViaEastAsiaSlot(latinViaEastAsiaSlotFor(parsed), docBodyEaFont(parsed))
+  setStaticAsciiResolver(() => editor.storage.listNumbering)
   // Chromium only hyphenates under an explicit lang (the app shell is zh-CN);
   // scoped to autoHyphenation docs so CJK font fallback is untouched elsewhere
   const lang = parsed.autoHyphenation ? parsed.docDefaults?.lang : undefined
@@ -487,6 +500,7 @@ export async function loadFile(
     const adopted = await adoptEmbeddedFonts(parsed.embeddedFonts)
     if (!adopted || generation !== openGeneration) return 'superseded'
     setDocFontTable(parsed.fontTable)
+    await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
     if (generation !== openGeneration) return 'superseded'
     ctx.editor.storage.listNumbering.styles = parsed.styles
@@ -507,7 +521,6 @@ export async function loadFile(
       hash: result.hash,
       encrypted: result.encrypted,
     })
-    ctx.onRevisionsLoaded(blocksHaveRevisions(parsed.blocks))
     // this tab's document was replaced: a password parked for the previous
     // unsaved draft is stale and must not encrypt this document's saves.
     // Done here, not in the main process's loadDocx — Review > Compare also
@@ -549,7 +562,9 @@ export async function loadFile(
     ctx.setEvenOddHfDirty(false)
     ctx.setMirrorMargins(parsed.mirrorMargins ?? false)
     ctx.setMirrorMarginsDirty(false)
-    ctx.setShowComments(hasUnanchoredComments(parsed.comments, parsed.blocks))
+    ctx.setShowComments(true)
+    ctx.setCommentPanelOpen(hasUnanchoredComments(parsed.comments, parsed.blocks))
+    ctx.setCommentPopup(null)
     ctx.setReadMode(tier === 'readOnly')
     ctx.setLargeDocSpellOff(tier !== 'normal')
     ctx.setComments(parsed.comments)
@@ -573,7 +588,8 @@ export async function loadFile(
     ctx.setThemeColors(parsed.themeColors ?? null)
     ctx.setThemeColorsDirty(false)
     ctx.setCommentComposing(false)
-    ctx.setTrackChanges(false)
+    ctx.setTrackChanges(parsed.trackRevisions ?? false)
+    ctx.setTrackRevisionsDirty(false)
     ctx.setProtection(parsed.protection)
     ctx.setProtectionDirty(false)
     ctx.setWriteProtection(parsed.writeProtection)
@@ -638,6 +654,7 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
     const adopted = await adoptEmbeddedFonts(parsed.embeddedFonts)
     if (!adopted || generation !== openGeneration) return
     setDocFontTable(parsed.fontTable)
+    await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
     if (generation !== openGeneration) return
     ctx.editor.storage.listNumbering.styles = parsed.styles
@@ -673,7 +690,9 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
     ctx.setHfVariants(hfVariantsFromParsed(parsed))
     ctx.setHfVariantsDirty([])
     resetCrossDocEditState(ctx)
-    ctx.setShowComments(false)
+    ctx.setShowComments(true)
+    ctx.setCommentPanelOpen(false)
+    ctx.setCommentPopup(null)
     ctx.setComments([])
     ctx.setCommentsDirty(false)
     ctx.setWatermark(null)
@@ -695,6 +714,7 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
     ctx.setThemeColorsDirty(false)
     ctx.setCommentComposing(false)
     ctx.setTrackChanges(false)
+    ctx.setTrackRevisionsDirty(false)
     ctx.setProtection(null)
     ctx.setProtectionDirty(false)
     ctx.setWriteProtection(null)
@@ -754,18 +774,68 @@ function deriveAutoFileName(editor: Editor): string | null {
   return null
 }
 
+/** The document's own text, as the model may read it. Never the raw document. */
+function modelTextOfDocument(editor: Editor): string {
+  // A name is read off the opening of a document; 8k characters is far past
+  // anything a stem could name, and bounds the walk on the UI thread.
+  return modelTextOf(editor.getJSON() as RedactableNode, { maxChars: 8000 })
+}
+
+/**
+ * A file name from a bare stem, in the shape the save path expects.
+ *
+ * The stem is an untrusted string — a model's answer, or nothing at all — so it
+ * goes through the same sanitizer as a heading: a name carrying a separator, a
+ * control character or a reserved Windows device word would otherwise become a
+ * path the save silently refuses, or worse, writes somewhere else.
+ */
+function docxNameFromStem(stem: string): string | null {
+  const base = sanitizeFileBaseName(stem)
+  return base ? `${base}.docx` : null
+}
+
+/**
+ * Ask the model to name this document, on request.
+ *
+ * The result is the file name offered in the Save As dialog rather than a
+ * rename: moving a file that may be open elsewhere, referenced from a note, or
+ * synced is not something to do behind the reader's back. The dialog is the
+ * confirmation. Returns '' when there is nothing usable, which leaves the
+ * dialog on the name the document already has.
+ *
+ * The text handed over is `modelTextOf`, never the editor's document. A selection
+ * the reader hid from the model stays hidden from this call too — the file name
+ * is the one thing that reaches them after the model has seen the rest of the
+ * document, so a leak here would survive the redaction it was meant to outlive.
+ */
+export async function suggestedSaveAsName(ctx: FileActionContext): Promise<string> {
+  const { editor } = ctx
+  if (!editor) return ''
+  const stem = await suggestFileName({ content: modelTextOfDocument(editor) })
+  // a full file name, extension and all, because this is what the save dialog takes
+  return docxNameFromStem(stem) ?? ''
+}
+
 /**
  * Serialize the current editor/document state to .docx bytes — the shared
  * serialization half of save(); no dialogs, no state changes. Also used for
  * crash-recovery copies.
+ *
+ * `pmOverride` serializes a document of the caller's making instead of the
+ * live one: the mail merge writes the template with one record's values in it,
+ * and the rest of the save (the sections, the headers, the pictures) is the
+ * save the document would get anyway.
  */
-export async function buildDocBytes(ctx: FileActionContext): Promise<Uint8Array | null> {
+export async function buildDocBytes(
+  ctx: FileActionContext,
+  pmOverride?: PmNode,
+): Promise<Uint8Array | null> {
   const generation = docGeneration
   if (ctx.settleFontSettings) ctx = await ctx.settleFontSettings()
   if (docGeneration !== generation) return null
   const { doc, editor } = ctx
   if (!doc || !editor) return null
-  const pmJson = editor.getJSON() as PmNode
+  const pmJson = pmOverride ?? (editor.getJSON() as PmNode)
   const plan = pmDocToSavePlan(pmJson, doc.parsed.blocks)
   // chart data edits patch the chart's own zip part, not the body XML
   const partXml: Record<string, string> = {}
@@ -837,6 +907,7 @@ export async function buildDocBytes(ctx: FileActionContext): Promise<Uint8Array 
   const bytes = await saveDocx(doc.parsed, saveBlocks, {
     pageCount: ctx.pageCount,
     newPictures: Object.keys(plan.newPictures).length > 0 ? plan.newPictures : undefined,
+    trailingSectPrChange: plan.trailingSectPrChange,
     section: ctx.sectionDirty && ctx.section ? ctx.section : undefined,
     sectionStartType: ctx.trailingStartType ?? undefined,
     pgNumType: ctx.pgNumEdit ?? undefined,
@@ -851,6 +922,7 @@ export async function buildDocBytes(ctx: FileActionContext): Promise<Uint8Array 
     titlePg: ctx.titlePgDirty ? ctx.titlePg : undefined,
     evenAndOddHeaders: ctx.evenOddHfDirty ? ctx.evenOddHf : undefined,
     mirrorMargins: ctx.mirrorMarginsDirty ? ctx.mirrorMargins : undefined,
+    trackRevisions: ctx.trackRevisionsDirty ? ctx.trackChanges : undefined,
     partXml: Object.keys(partXml).length > 0 ? partXml : undefined,
     partBinary: Object.keys(partBinary).length > 0 ? partBinary : undefined,
     comments: ctx.commentsDirty ? ctx.comments : undefined,
@@ -949,6 +1021,24 @@ export function noteDocumentSwapped(): void {
 
 export function currentDocGeneration(): number {
   return docGeneration
+}
+
+/**
+ * The name a Save As dialog opens on.
+ *
+ * A name the caller proposed for this pass leads, then the name derived from
+ * the document's own first heading, then the name the document already has.
+ *
+ * Named rather than inlined so the precedence is stated once and testable: a
+ * proposal that never reaches the dialog is a manual trigger that does nothing
+ * silently, which is exactly how this shipped before it had a call site.
+ */
+export function dialogNameFor(
+  proposed: string | undefined,
+  derived: string | null,
+  current: string,
+): string {
+  return proposed ?? derived ?? current
 }
 
 export function save(
@@ -1094,14 +1184,34 @@ async function saveOnce(
       if (result.dataUrl) fullBytes = await fetchDocBytes(result.dataUrl)
       if (!doc.filePath) pathlessDocSavedPath = savedPath
     } else if (saveAs || !savedPath) {
-      // A never-saved document still called "Untitled" gets a name derived from its first heading
+      // A never-saved document still called "Untitled" gets a name derived from its
+      // first heading. The model is not asked here: a name the reader never saw is
+      // hard to trust, and a save must not wait on a model round-trip.
+      //
+      // A caller that already carries a name — the AI's create_document writing a
+      // document under the title it was given — asks no question either: the name
+      // is settled, and a model call here would only be a second opinion nobody
+      // asked for.
       const autoName =
-        !doc.filePath && doc.fileName === t('appUntitledDocx') ? deriveAutoFileName(editor) : null
+        !newDocName && !doc.filePath && doc.fileName === t('appUntitledDocx') && ctx.editor
+          ? deriveAutoFileName(ctx.editor)
+          : null
       // Save As keeps the dialog; a new document's first save lands silently in the default
       // folder. The source path identifies the desired password state to snapshot.
+      // `newDocName` is a name the caller proposed for this pass — the manual
+      // trigger's model stem — so it leads the dialog's default on both
+      // branches. It is a proposal, not a decision: the dialog is the
+      // confirmation, and nothing is renamed on disk behind the reader.
       const result = saveAs
-        ? await window.desktop.saveDocxAs(autoName ?? doc.fileName, buffer, doc.filePath)
-        : await window.desktop.saveDocxNew(newDocName ?? autoName ?? doc.fileName, buffer)
+        ? await window.desktop.saveDocxAs(
+            dialogNameFor(newDocName, autoName, doc.fileName),
+            buffer,
+            doc.filePath,
+          )
+        : await window.desktop.saveDocxNew(
+            dialogNameFor(newDocName, autoName, doc.fileName),
+            buffer,
+          )
       if (!result.ok) {
         if (result.error) {
           ctx.setStatus(t('appSaveFailed', { error: result.error }))
@@ -1181,7 +1291,12 @@ async function saveOnce(
       // win, and the marks must belong to the position they are restored at.
       const selectionPos = editor.state.selection.from
       const caretMarks = caretMarksSnapshot(editor)
-      editor.commands.setContent(rebasedPm as never)
+      // Rebase saved anchors without recording the reload as a user edit.
+      editor
+        .chain()
+        .setMeta(TRACK_IGNORE, true)
+        .setContent(rebasedPm as never)
+        .run()
       resetEditorHistory(editor)
       const chain = editor
         .chain()
@@ -1235,6 +1350,7 @@ async function saveOnce(
     ctx.setEvenOddHfDirty(false)
     ctx.setMirrorMargins(reparsed.mirrorMargins ?? false)
     ctx.setMirrorMarginsDirty(false)
+    ctx.setTrackRevisionsDirty(false)
     ctx.setComments(reparsed.comments)
     ctx.setCommentsDirty(false)
     ctx.setWatermark(reparsed.watermarkText ?? null)

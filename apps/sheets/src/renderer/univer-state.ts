@@ -4,6 +4,7 @@
  * Used by both the App component (App.tsx) and the module-level sync
  * helpers (univer-sync.ts).
  */
+import type { SheetPasswordHash } from '@genoffice/xlsx-gateway/gateway/xlsx-protection-hash'
 import type { SheetProtectionInfo } from './sheet-protection'
 import { BorderType, LocalUndoRedoService, Worksheet, type IRange } from '@univerjs/core'
 import { SheetInterceptorService } from '@univerjs/sheets'
@@ -102,7 +103,12 @@ export interface LazyWorkbookState {
   /// File-side allow-edit ranges, known once a sheet finishes indexing.
   readonly sheetProtectedRanges: Map<
     string,
-    { name: string; sqref: string; hasPassword: boolean }[]
+    {
+      name: string
+      sqref: string
+      hasPassword: boolean
+      password?: SheetPasswordHash
+    }[]
   >
   /// Defined names the Univer engine rejected at install — preserved verbatim
   /// by the declarative defined-names save.
@@ -178,6 +184,11 @@ export interface LazyWorkbookState {
     engineOverBudget: boolean
     readonly formulaCells: Map<string, ReadonlySet<number>>
     readonly overlay: Map<string, Map<string, PinnedClosureCell>>
+    /// Sheets whose latest engine run had to keep at least one cached value
+    /// (the model lacks a function or reference, so every value derived from
+    /// the gap is suspect): the save must not refresh cached <v>s from such
+    /// an overlay — the file's own results are Excel's and stay authoritative.
+    readonly incompleteRuns: Set<string>
     /// per-sheet: viewport row the last SUCCESSFUL overlay window was
     /// anchored at and whether it covered every formula band; a partial
     /// window re-anchors when the user scrolls far from it. Written only

@@ -193,6 +193,7 @@ export const it = {
   appCtxSendToBack: 'Porta in secondo piano',
   appCtxBringForward: 'Porta avanti',
   appCtxSendBackward: 'Porta indietro',
+  appCtxRotate: 'Ruota',
   appCtxRotateLeft90: 'Ruota di 90° a sinistra',
   appCtxRotateRight90: 'Ruota di 90° a destra',
   appCtxFlipH: 'Capovolgi orizzontalmente',
@@ -232,6 +233,8 @@ export const it = {
   appMasterFillNone: 'Nessun riempimento',
   appMasterStroke: 'Colore contorno…',
   appMasterStrokeNone: 'Nessun contorno',
+  appMasterInsertTextBox: 'Casella di Testo',
+  appMasterInsertShape: 'Forme',
   appStartOpening: 'Apertura…',
   appReadingSlideTitle:
     'Fai clic per passare alla diapositiva successiva (Esc per uscire dalla visualizzazione di lettura)',

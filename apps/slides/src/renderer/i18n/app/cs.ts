@@ -182,6 +182,7 @@ export const cs = {
   appCtxSendToBack: 'Přenést do pozadí',
   appCtxBringForward: 'Přenést blíž',
   appCtxSendBackward: 'Přenést dál',
+  appCtxRotate: 'Otočit',
   appCtxRotateLeft90: 'Otočit vlevo o 90°',
   appCtxRotateRight90: 'Otočit vpravo o 90°',
   appCtxFlipH: 'Překlopit vodorovně',
@@ -221,6 +222,8 @@ export const cs = {
   appMasterFillNone: 'Bez výplně',
   appMasterStroke: 'Barva obrysu…',
   appMasterStrokeNone: 'Bez obrysu',
+  appMasterInsertTextBox: 'Textové pole',
+  appMasterInsertShape: 'Obrazce',
   appStartOpening: 'Otevírá se…',
   appReadingSlideTitle:
     'Kliknutím přejdete na další snímek (zobrazení pro čtení ukončíte klávesou Esc)',

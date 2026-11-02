@@ -30,7 +30,9 @@ import {
 } from 'electron'
 import type { MenuItemConstructorOptions, NativeImage, WebContents } from 'electron'
 import { atomicCopyFile, atomicWriteFile } from './atomic-write'
+import { registerAiNamingIpc } from './ai-naming-service'
 import { tabStripOverlay } from './title-bar-overlay'
+import { shellWindowBackground } from './window-background'
 import {
   applyUiScaleTo,
   applyUiScaleToAll,
@@ -83,6 +85,8 @@ import {
   readAuthorNameSetting,
   sanitizeAuthorName,
   systemAuthorName,
+  readLegacyImportPrompt,
+  writeLegacyImportPrompt,
 } from '@genoffice/electron-utils'
 import { createMainProcessProxyDispatcher } from '@genoffice/electron-utils/main-proxy'
 import {
@@ -92,6 +96,12 @@ import {
   writeAppSettingThen,
 } from './app-settings'
 import { OPEN_DOCUMENTS_FILE, clearOpenDocuments, publishOpenDocuments } from './open-documents'
+import {
+  LAST_SESSION_DOCUMENTS_KEY,
+  RESTORE_LAST_SESSION_KEY,
+  launchPathsWithLastSession,
+  restoreLastSessionEnabled,
+} from './last-session'
 import { startControlServer, type ControlServer } from './control-server'
 import { controlHandler } from './control-handlers'
 import { installCliLinkBestEffort } from './cli-link'
@@ -354,6 +364,7 @@ import {
   searchKnowledgeBase,
 } from './knowledge-base'
 import { createFileViaCli } from './mcp/headless-cli'
+import { homeCliContext, runHomeCli, type HomeCliDeps } from './home-cli'
 import { sanitizeFileBase } from './mcp/tools/document-tools'
 import { runHeadlessExport, type HeadlessExporters } from './headless-export'
 import { TabManager } from './tab-manager'
@@ -374,6 +385,7 @@ import {
   activateDetached,
   closeDetachedWithoutPrompt,
   createDetachedEditorWindow,
+  detachedFileForWebContents,
   detachedFilePaths,
   detachedOpenDocuments,
   detachedRenameFile,
@@ -495,6 +507,8 @@ function bundledCliRunner(): ReturnType<typeof createCliRunner> {
     entry: app.isPackaged
       ? join(process.resourcesPath, 'cli', 'genoffice.cjs')
       : join(APPS_ROOT, '..', 'packages', 'cli', 'dist', 'genoffice.cjs'),
+    // the sheets engine the app itself runs; the CLI's own lookup only knows the packaged layout and a checkout
+    env: existsSync(SIDECAR_BIN) ? { XLSX_SIDECAR_PATH: SIDECAR_BIN } : {},
   })
   return cliRunner
 }
@@ -605,6 +619,20 @@ function currentUpdateChannel(): UpdateChannel {
   return cachedUpdateChannel
 }
 
+let cachedAutoUpdateCheck: boolean | null = null
+
+function autoUpdateCheckEnabled(): boolean {
+  cachedAutoUpdateCheck ??= readAppSettings(APP_SETTINGS_PATH()).autoUpdateCheck !== false
+  return cachedAutoUpdateCheck
+}
+
+let cachedSilentInstallUpdate: boolean | null = null
+
+function silentInstallUpdateEnabled(): boolean {
+  cachedSilentInstallUpdate ??= readAppSettings(APP_SETTINGS_PATH()).silentInstallUpdate === true
+  return cachedSilentInstallUpdate
+}
+
 let cachedTheme: UiTheme | null = null
 
 function currentTheme(): UiTheme {
@@ -649,6 +677,13 @@ function currentMcpSettings(): McpSettings {
     background: saved.mcpBackground === true,
     logging: saved.mcpLogging === true,
   }
+}
+
+let cachedTabSleepEnabled: boolean | null = null
+
+function tabSleepEnabled(): boolean {
+  cachedTabSleepEnabled ??= readAppSettings(APP_SETTINGS_PATH()).tabSleepEnabled !== false
+  return cachedTabSleepEnabled
 }
 
 let cachedAiPanelPrefs: AiPanelPrefs | null = null
@@ -811,12 +846,15 @@ const tMain = createI18n({
     menuTabCloseRight: '关闭右侧标签页',
     menuTabCloseAll: '关闭所有标签页',
     menuTabReopen: '重新打开关闭的标签页',
+    menuTabPin: '固定标签页（不休眠）',
+    menuTabUnpin: '取消固定标签页',
     dlgAddFolderRoot: '添加文件夹到首页',
     watchdogTitle: '文档占用资源过高',
     watchdogBody:
       '“{title}” 已持续数分钟占用大量内存或 CPU（内存 {memory} MB，CPU {cpu}%）。可以继续等待，或关闭这个文档（有未保存的改动会先询问是否保存）。诊断信息已记录。', // public-hygiene: allow
     watchdogWait: '继续等待',
     watchdogClose: '关闭文档',
+    watchdogIgnore: '本次不再提醒',
     errFolderRootUnusable: '无法读取所选文件夹',
     menuFile: '文件',
     menuSectionNew: '新建',
@@ -929,12 +967,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Close tabs to the right',
     menuTabCloseAll: 'Close all tabs',
     menuTabReopen: 'Reopen closed tab',
+    menuTabPin: 'Pin tab (keep loaded)',
+    menuTabUnpin: 'Unpin tab',
     dlgAddFolderRoot: 'Add Folder to Home',
     watchdogTitle: 'Document is using too many resources',
     watchdogBody:
       '"{title}" has been using a lot of memory or CPU for several minutes ({memory} MB, {cpu}% CPU). You can keep waiting, or close the document (you will be asked to save unsaved changes first). Diagnostics have been recorded.',
     watchdogWait: 'Keep Waiting',
     watchdogClose: 'Close Document',
+    watchdogIgnore: "Don't Remind Again",
     errFolderRootUnusable: 'The selected folder cannot be read',
     menuFile: 'File',
     menuSectionNew: 'New',
@@ -1057,12 +1098,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Đóng các thẻ bên phải',
     menuTabCloseAll: 'Đóng tất cả các thẻ',
     menuTabReopen: 'Mở lại thẻ vừa đóng',
+    menuTabPin: 'Ghim thẻ (luôn tải)',
+    menuTabUnpin: 'Bỏ ghim thẻ',
     dlgAddFolderRoot: 'Thêm thư mục vào Trang chủ',
     watchdogTitle: 'Tài liệu đang dùng quá nhiều tài nguyên',
     watchdogBody:
       '"{title}" đã dùng nhiều bộ nhớ hoặc CPU trong vài phút ({memory} MB, {cpu}% CPU). Bạn có thể tiếp tục chờ hoặc đóng tài liệu này (sẽ hỏi lưu các thay đổi chưa lưu trước). Thông tin chẩn đoán đã được ghi lại.',
     watchdogWait: 'Tiếp tục chờ',
     watchdogClose: 'Đóng tài liệu',
+    watchdogIgnore: 'Không nhắc lại nữa',
     errFolderRootUnusable: 'Không thể đọc thư mục đã chọn',
     menuFile: 'Tệp',
     menuSectionNew: 'Mới',
@@ -1168,6 +1212,136 @@ const tMain = createI18n({
     dlgPickSaveDir: 'Chọn vị trí lưu mặc định',
     errSaveDirUnusable: 'Thư mục đã chọn không thể ghi và không thể dùng làm vị trí lưu mặc định',
   },
+  tr: {
+    menuTabSave: 'Kaydet',
+    menuTabSaveAs: 'Farklı Kaydet…',
+    menuTabPrint: 'Yazdır…',
+    menuTabRename: 'Yeniden Adlandır',
+    menuTabDuplicate: 'Çoğalt (kayıtlı dosyayı kopyala)',
+    menuTabSplitBeside: 'Yan yana böl',
+    menuTabCopyPath: 'Yolu kopyala',
+    menuTabCopyName: 'Dosya adını kopyala',
+    menuTabReveal: 'Klasörde göster',
+    menuTabOpenDefault: 'Varsayılan uygulamayla aç',
+    menuTabMoveLeft: 'Sola taşı',
+    menuTabMoveRight: 'Sağa taşı',
+    menuTabCloseOthers: 'Diğer sekmeleri kapat',
+    menuTabCloseRight: 'Sağdaki sekmeleri kapat',
+    menuTabCloseAll: 'Tüm sekmeleri kapat',
+    menuTabReopen: 'Kapatılan sekmeyi yeniden aç',
+    menuTabPin: 'Sekmeyi sabitle (yüklü tut)',
+    menuTabUnpin: 'Sekme sabitlemesini kaldır',
+    dlgAddFolderRoot: 'Ana Sayfaya Klasör Ekle',
+    watchdogTitle: 'Belge çok fazla kaynak kullanıyor',
+    watchdogBody:
+      '"{title}" birkaç dakikadır çok fazla bellek veya CPU kullanıyor ({memory} MB, %{cpu} CPU). Beklemeye devam edebilir ya da belgeyi kapatabilirsiniz (önce kaydedilmemiş değişiklikleri kaydetmeniz istenecek). Tanılama bilgileri kaydedildi.',
+    watchdogWait: 'Beklemeye Devam Et',
+    watchdogClose: 'Belgeyi Kapat',
+    watchdogIgnore: 'Bir Daha Hatırlatma',
+    errFolderRootUnusable: 'Seçilen klasör okunamıyor',
+    menuFile: 'Dosya',
+    menuSectionNew: 'Yeni',
+    menuView: 'Görünüm',
+    menuUiZoomIn: 'Arayüzü Yakınlaştır',
+    menuUiZoomOut: 'Arayüzü Uzaklaştır',
+    menuUiZoomReset: 'Arayüz Yakınlaştırmasını Sıfırla',
+    menuOpenInNewWindow: 'Yeni Pencerede Aç',
+    menuNewDoc: 'AI Docs',
+    menuNewSheet: 'AI Sheets',
+    untitledSheet: 'Adsız Elektronik Tablo',
+    untitledDoc: 'Adsız Belge',
+    untitledDeck: 'Adsız Sunu',
+    untitledMarkdown: 'Adsız Markdown',
+    untitledHtml: 'Adsız HTML',
+    untitledPdf: 'Adsız PDF',
+    menuNewSlide: 'AI Slides',
+    menuNewMarkdown: 'AI Markdown',
+    menuNewHtml: 'AI HTML',
+    menuNewPdf: 'AI PDF',
+    menuExportPdf: 'PDF Olarak Dışa Aktar…',
+    menuExportImages: 'Görüntü Olarak Dışa Aktar…',
+    menuExportHtml: 'Tek Dosyalı HTML Olarak Dışa Aktar…',
+    menuOpenInDocs: 'Dönüştür ve Docs ile Aç',
+    menuPrint: 'Yazdır…',
+    menuOpen: 'Aç…',
+    menuSave: 'Kaydet',
+    menuSaveAs: 'Farklı Kaydet…',
+    menuClose: 'Kapat',
+    menuEdit: 'Düzenle',
+    menuWindow: 'Pencere',
+    menuHome: 'Ana Sayfa',
+    backToHome: 'Ana Sayfaya Dön',
+    dlgOpenTitle: 'Dosya Aç',
+    filterSupported: 'Desteklenen Dosyalar',
+    filterWord: 'Word Belgeleri',
+    filterExcel: 'Excel Çalışma Kitapları',
+    filterPpt: 'PowerPoint Sunuları',
+    filterMarkdown: 'Metin Dosyaları (Markdown, TXT, JSON)',
+    filterHtml: 'HTML Belgeleri',
+    filterPdf: 'PDF Belgeleri',
+    errBadArgs: 'Geçersiz bağımsız değişkenler',
+    errBadName: 'Geçersiz dosya adı',
+    errBadExtension: 'Bu uzantı desteklenmiyor ve dosya bir daha açılamaz',
+    errMissing: 'Dosya bulunamadı',
+    errExists: 'Bu adda bir dosya zaten var',
+    errRenameFailed: 'Yeniden adlandırma başarısız oldu',
+    errPdfSaveAsFailed: 'PDF kopyası kaydedilemedi',
+    errNewTabFailed: 'Yeni belge oluşturulamadı',
+    errDuplicateFailed: 'Dosya çoğaltılamadı',
+    errUnsupportedExt: '.{ext} dosyaları desteklenmiyor',
+    copySuffix: 'kopya',
+    menuHelp: 'Yardım',
+    menuUserGuide: 'Kullanım Kılavuzu',
+    thirdPartyNotices: 'Üçüncü Taraf Bildirimleri',
+    menuExportDocx: 'Word Olarak Dışa Aktar…',
+    btnCancel: 'İptal',
+    pdfDocxFailedMsg: 'Word olarak dışa aktarma başarısız oldu',
+    pdfConvertFailedMsg: 'Markdown / HTML olarak dışa aktarma başarısız oldu',
+    pdfDocxBusyMsg: 'Zaten bir Word dışa aktarma işlemi sürüyor. Lütfen bitmesini bekleyin.',
+    menuExportPptx: 'PowerPoint Olarak Dışa Aktar…',
+    pdfPptxFailedMsg: 'PowerPoint olarak dışa aktarma başarısız oldu',
+    pdfPptxBusyMsg: 'Zaten bir dışa aktarma işlemi sürüyor. Lütfen bitmesini bekleyin.',
+    pdfPptxLocalScannedDetail:
+      'Her sayfa tam sayfa görüntü olarak dışa aktarıldı; slaytlardaki metin düzenlenemez.',
+    menuExportXlsx: 'Excel Olarak Dışa Aktar…',
+    pdfXlsxFailedMsg: 'Excel olarak dışa aktarma başarısız oldu',
+    pdfXlsxBusyMsg: 'Zaten bir dışa aktarma işlemi sürüyor. Lütfen bitmesini bekleyin.',
+    pdfXlsxLocalScannedDetail:
+      'Taranmış sayfalar hücrelere dönüştürülemez; bunun yerine her sayfanın çalışma sayfasında bir bildirim satırı bulunur.',
+    pdfXlsxLocalSkippedMsg: 'Bazı sayfalar hücrelere dönüştürülmedi',
+    pdfXlsxLocalSkippedDetail:
+      '{pages} numaralı sayfalar hücrelere dönüştürülemedi; bunun yerine çalışma sayfalarında bir bildirim satırı bulunur.',
+    pdfDocxLocalScannedMsg: 'Taranmış belge algılandı',
+    pdfMdLocalMissingMsg: 'Markdown dosyasında bazı içerikler eksik',
+    pdfMdLocalScannedDetail:
+      'Düzenlenebilir metin tanınamadığından Markdown dosyasında kullanılabilir içerik yok.',
+    pdfMdLocalDroppedDetail:
+      '{pages} numaralı sayfa(lar) güvenilir biçimde yeniden oluşturulamadı; Markdown görüntü taşıyamadığından içerikleri eksik.',
+    pdfDocxLocalScannedDetail:
+      'Sayfalar görünümlerini korumak için görüntü olarak dışa aktarıldı; düzenlenebilir metin tanınamadı.',
+    pdfDocxLocalDegradedMsg: 'Bazı sayfalar görüntü olarak dışa aktarıldı',
+    pdfDocxLocalDegradedDetail:
+      '{pages} numaralı sayfa(lar) güvenilir biçimde yeniden oluşturulamadı ve tam sayfa görüntü olarak dışa aktarıldı.',
+    pdfDocxLocalOcrMsg: 'Taranmış sayfalar düzenlenebilir metne dönüştürüldü',
+    pdfDocxLocalOcrDetail:
+      '{pages} numaralı sayfa(lar) taramaydı; metinleri cihaz üzerinde OCR ile kurtarıldı. Lütfen sonucu gözden geçirin.',
+    pdfDocxLocalEncryptedDetail: 'Bu PDF şifreli ve doğru parola olmadan açılamadı.',
+    pdfDocxLocalUnsupportedEncDetail:
+      'Bu PDF sertifika tabanlı veya desteklenmeyen başka bir şifreleme kullanıyor ve dönüştürülemez.',
+    pdfPwdTitle: 'Parola Girin',
+    pdfPwdPrompt: 'Bu PDF şifreli. Açmak için parolayı girin:',
+    pdfPwdRetryPrompt: 'Parola yanlış. Lütfen yeniden deneyin.',
+    pdfPwdOk: 'Tamam',
+    pdfPwdVerifying: 'Parola doğrulanıyor…',
+    pdfPwdLabel: 'Parola',
+    pdfPwdPlaceholder: 'Açma parolasını girin',
+    pdfPwdShow: 'Parolayı göster',
+    pdfPwdHide: 'Parolayı gizle',
+    pdfDocxLocalCorruptDetail: 'Dosya bozuk veya geçerli bir PDF değil ve dönüştürülemez.',
+    dlgPickSaveDir: 'Varsayılan Kayıt Konumunu Seçin',
+    errSaveDirUnusable:
+      'Seçilen klasör yazılabilir değil ve varsayılan kayıt konumu olarak kullanılamaz',
+  },
   ja: {
     menuTabSave: '保存',
     menuTabSaveAs: '名前を付けて保存…',
@@ -1185,12 +1359,15 @@ const tMain = createI18n({
     menuTabCloseRight: '右側のタブを閉じる',
     menuTabCloseAll: 'すべてのタブを閉じる',
     menuTabReopen: '閉じたタブを再度開く',
+    menuTabPin: 'タブをピン留め（スリープしない）',
+    menuTabUnpin: 'タブのピン留めを解除',
     dlgAddFolderRoot: 'フォルダーをホームに追加',
     watchdogTitle: 'ドキュメントのリソース使用量が過大です',
     watchdogBody:
       '「{title}」が数分間にわたり大量のメモリまたは CPU を使用しています（メモリ {memory} MB、CPU {cpu}%）。そのまま待つか、このドキュメントを閉じることができます（未保存の変更がある場合は保存を確認します）。診断情報を記録しました。',
     watchdogWait: '待つ',
     watchdogClose: 'ドキュメントを閉じる',
+    watchdogIgnore: '今回は再通知しない',
     errFolderRootUnusable: '選択したフォルダーを読み取れません',
     menuFile: 'ファイル',
     menuSectionNew: '新規作成',
@@ -1313,12 +1490,15 @@ const tMain = createI18n({
     menuTabCloseRight: '오른쪽 탭 닫기',
     menuTabCloseAll: '모든 탭 닫기',
     menuTabReopen: '닫힌 탭 다시 열기',
+    menuTabPin: '탭 고정(절전 안 함)',
+    menuTabUnpin: '탭 고정 해제',
     dlgAddFolderRoot: '홈에 폴더 추가',
     watchdogTitle: '문서가 리소스를 과도하게 사용하고 있습니다',
     watchdogBody:
       '"{title}"이(가) 몇 분 동안 많은 메모리 또는 CPU를 사용하고 있습니다(메모리 {memory} MB, CPU {cpu}%). 계속 기다리거나 이 문서를 닫을 수 있습니다(저장되지 않은 변경 사항이 있으면 먼저 저장 여부를 묻습니다). 진단 정보가 기록되었습니다.',
     watchdogWait: '계속 기다리기',
     watchdogClose: '문서 닫기',
+    watchdogIgnore: '다시 알리지 않음',
     errFolderRootUnusable: '선택한 폴더를 읽을 수 없습니다',
     menuFile: '파일',
     menuSectionNew: '새로 만들기',
@@ -1440,12 +1620,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Fermer les onglets à droite',
     menuTabCloseAll: 'Fermer tous les onglets',
     menuTabReopen: "Rouvrir l'onglet fermé",
+    menuTabPin: 'Épingler l’onglet (garder chargé)',
+    menuTabUnpin: 'Désépingler l’onglet',
     dlgAddFolderRoot: "Ajouter un dossier à l'accueil",
     watchdogTitle: 'Le document consomme trop de ressources',
     watchdogBody:
       '« {title} » utilise beaucoup de mémoire ou de processeur depuis plusieurs minutes ({memory} Mo, {cpu} % CPU). Vous pouvez continuer à attendre ou fermer ce document (il vous sera d’abord demandé d’enregistrer les modifications non sauvegardées). Les diagnostics ont été enregistrés.',
     watchdogWait: 'Continuer d’attendre',
     watchdogClose: 'Fermer le document',
+    watchdogIgnore: 'Ne plus rappeler',
     errFolderRootUnusable: 'Le dossier sélectionné ne peut pas être lu',
     menuFile: 'Fichier',
     menuSectionNew: 'Nouveau',
@@ -1569,12 +1752,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Rechts liegende Tabs schließen',
     menuTabCloseAll: 'Alle Tabs schließen',
     menuTabReopen: 'Geschlossenen Tab wieder öffnen',
+    menuTabPin: 'Tab anheften (geladen lassen)',
+    menuTabUnpin: 'Tab lösen',
     dlgAddFolderRoot: 'Ordner zur Startseite hinzufügen',
     watchdogTitle: 'Dokument beansprucht zu viele Ressourcen',
     watchdogBody:
       '„{title}“ belegt seit mehreren Minuten viel Arbeitsspeicher oder CPU ({memory} MB, {cpu} % CPU). Sie können weiter warten oder das Dokument schließen (bei ungespeicherten Änderungen werden Sie zuerst zum Speichern gefragt). Diagnosedaten wurden aufgezeichnet.',
     watchdogWait: 'Weiter warten',
     watchdogClose: 'Dokument schließen',
+    watchdogIgnore: 'Nicht mehr erinnern',
     errFolderRootUnusable: 'Der ausgewählte Ordner kann nicht gelesen werden',
     menuFile: 'Datei',
     menuSectionNew: 'Neu',
@@ -1699,12 +1885,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Cerrar pestañas a la derecha',
     menuTabCloseAll: 'Cerrar todas las pestañas',
     menuTabReopen: 'Reabrir pestaña cerrada',
+    menuTabPin: 'Fijar pestaña (mantener cargada)',
+    menuTabUnpin: 'Desfijar pestaña',
     dlgAddFolderRoot: 'Añadir carpeta al inicio',
     watchdogTitle: 'El documento consume demasiados recursos',
     watchdogBody:
       '«{title}» lleva varios minutos usando mucha memoria o CPU ({memory} MB, {cpu} % de CPU). Puedes seguir esperando o cerrar el documento (antes se te pedirá guardar los cambios sin guardar). Se ha registrado el diagnóstico.',
     watchdogWait: 'Seguir esperando',
     watchdogClose: 'Cerrar documento',
+    watchdogIgnore: 'No recordar de nuevo',
     errFolderRootUnusable: 'No se puede leer la carpeta seleccionada',
     menuFile: 'Archivo',
     menuSectionNew: 'Nuevo',
@@ -1828,12 +2017,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'ปิดแท็บทางขวา',
     menuTabCloseAll: 'ปิดแท็บทั้งหมด',
     menuTabReopen: 'เปิดแท็บที่ปิดไปอีกครั้ง',
+    menuTabPin: 'ปักหมุดแท็บ (ไม่พักการทำงาน)',
+    menuTabUnpin: 'เลิกปักหมุดแท็บ',
     dlgAddFolderRoot: 'เพิ่มโฟลเดอร์ไปยังหน้าแรก',
     watchdogTitle: 'เอกสารใช้ทรัพยากรมากเกินไป',
     watchdogBody:
       '"{title}" ใช้หน่วยความจำหรือ CPU จำนวนมากติดต่อกันหลายนาที (หน่วยความจำ {memory} MB, CPU {cpu}%) คุณสามารถรอต่อไปหรือปิดเอกสารนี้ได้ (หากมีการเปลี่ยนแปลงที่ยังไม่บันทึกจะถามให้บันทึกก่อน) บันทึกข้อมูลวินิจฉัยแล้ว',
     watchdogWait: 'รอต่อไป',
     watchdogClose: 'ปิดเอกสาร',
+    watchdogIgnore: 'ไม่ต้องเตือนอีก',
     errFolderRootUnusable: 'ไม่สามารถอ่านโฟลเดอร์ที่เลือกได้',
     menuFile: 'ไฟล์',
     menuSectionNew: 'สร้างใหม่',
@@ -1953,12 +2145,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Tutup tab di kanan',
     menuTabCloseAll: 'Tutup semua tab',
     menuTabReopen: 'Buka kembali tab tertutup',
+    menuTabPin: 'Sematkan tab (tetap dimuat)',
+    menuTabUnpin: 'Lepas sematan tab',
     dlgAddFolderRoot: 'Tambahkan Folder ke Beranda',
     watchdogTitle: 'Dokumen menggunakan terlalu banyak sumber daya',
     watchdogBody:
       '"{title}" telah menggunakan banyak memori atau CPU selama beberapa menit ({memory} MB, CPU {cpu}%). Anda dapat terus menunggu atau menutup dokumen ini (perubahan yang belum disimpan akan ditanyakan lebih dulu). Diagnostik telah dicatat.',
     watchdogWait: 'Terus Menunggu',
     watchdogClose: 'Tutup Dokumen',
+    watchdogIgnore: 'Jangan ingatkan lagi',
     errFolderRootUnusable: 'Folder yang dipilih tidak dapat dibaca',
     menuFile: 'File',
     menuSectionNew: 'Baru',
@@ -2082,12 +2277,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Закрыть вкладки справа',
     menuTabCloseAll: 'Закрыть все вкладки',
     menuTabReopen: 'Открыть закрытую вкладку',
+    menuTabPin: 'Закрепить вкладку (не усыплять)',
+    menuTabUnpin: 'Открепить вкладку',
     dlgAddFolderRoot: 'Добавить папку на главную',
     watchdogTitle: 'Документ потребляет слишком много ресурсов',
     watchdogBody:
       '«{title}» уже несколько минут использует много памяти или процессора ({memory} МБ, {cpu}% CPU). Можно подождать ещё или закрыть документ (при несохранённых изменениях сначала будет предложено сохранить). Диагностика записана.',
     watchdogWait: 'Подождать',
     watchdogClose: 'Закрыть документ',
+    watchdogIgnore: 'Больше не напоминать',
     errFolderRootUnusable: 'Не удалось прочитать выбранную папку',
     menuFile: 'Файл',
     menuSectionNew: 'Создать',
@@ -2211,12 +2409,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'إغلاق علامات التبويب على اليمين',
     menuTabCloseAll: 'إغلاق جميع علامات التبويب',
     menuTabReopen: 'إعادة فتح علامة التبويب المغلقة',
+    menuTabPin: 'تثبيت علامة التبويب (إبقاؤها محمّلة)',
+    menuTabUnpin: 'إلغاء تثبيت علامة التبويب',
     dlgAddFolderRoot: 'إضافة مجلد إلى الصفحة الرئيسية',
     watchdogTitle: 'المستند يستهلك موارد كثيرة جدًا',
     watchdogBody:
       'يستهلك "{title}" قدرًا كبيرًا من الذاكرة أو المعالج منذ عدة دقائق (الذاكرة {memory} م.ب، المعالج {cpu}%). يمكنك مواصلة الانتظار أو إغلاق هذا المستند (سيُطلب حفظ التغييرات غير المحفوظة أولًا). تم تسجيل بيانات التشخيص.',
     watchdogWait: 'مواصلة الانتظار',
     watchdogClose: 'إغلاق المستند',
+    watchdogIgnore: 'عدم التذكير مجددًا',
     errFolderRootUnusable: 'لا يمكن قراءة المجلد المحدد',
     menuFile: 'ملف',
     menuSectionNew: 'جديد',
@@ -2336,12 +2537,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Fechar abas à direita',
     menuTabCloseAll: 'Fechar todas as abas',
     menuTabReopen: 'Reabrir aba fechada',
+    menuTabPin: 'Fixar separador (manter carregado)',
+    menuTabUnpin: 'Desafixar separador',
     dlgAddFolderRoot: 'Adicionar pasta à página inicial',
     watchdogTitle: 'O documento está a consumir demasiados recursos',
     watchdogBody:
       '"{title}" está a usar muita memória ou CPU há vários minutos ({memory} MB, {cpu}% de CPU). Pode continuar a aguardar ou fechar o documento (será pedido para guardar alterações não guardadas primeiro). O diagnóstico foi registado.',
     watchdogWait: 'Continuar a aguardar',
     watchdogClose: 'Fechar documento',
+    watchdogIgnore: 'Não lembrar novamente',
     errFolderRootUnusable: 'Não é possível ler a pasta selecionada',
     menuFile: 'Arquivo',
     menuSectionNew: 'Novo',
@@ -2465,12 +2669,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Chiudi schede a destra',
     menuTabCloseAll: 'Chiudi tutte le schede',
     menuTabReopen: 'Riapri scheda chiusa',
+    menuTabPin: 'Fissa scheda (mantieni caricata)',
+    menuTabUnpin: 'Sblocca scheda',
     dlgAddFolderRoot: 'Aggiungi cartella alla Home',
     watchdogTitle: 'Il documento sta usando troppe risorse',
     watchdogBody:
       '"{title}" sta usando molta memoria o CPU da diversi minuti ({memory} MB, {cpu}% CPU). Puoi continuare ad attendere o chiudere il documento (ti verrà chiesto prima di salvare le modifiche non salvate). La diagnostica è stata registrata.',
     watchdogWait: 'Continua ad attendere',
     watchdogClose: 'Chiudi documento',
+    watchdogIgnore: 'Non ricordare più',
     errFolderRootUnusable: 'Impossibile leggere la cartella selezionata',
     menuFile: 'File',
     menuSectionNew: 'Nuovo',
@@ -2594,12 +2801,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Zamknij karty po prawej',
     menuTabCloseAll: 'Zamknij wszystkie karty',
     menuTabReopen: 'Otwórz ponownie zamkniętą kartę',
+    menuTabPin: 'Przypnij kartę (nie usypiaj)',
+    menuTabUnpin: 'Odepnij kartę',
     dlgAddFolderRoot: 'Dodaj folder do strony głównej',
     watchdogTitle: 'Dokument zużywa zbyt dużo zasobów',
     watchdogBody:
       '„{title}” od kilku minut zużywa dużo pamięci lub procesora ({memory} MB, {cpu}% CPU). Możesz dalej czekać albo zamknąć dokument (najpierw pojawi się pytanie o zapisanie niezapisanych zmian). Dane diagnostyczne zostały zapisane.',
     watchdogWait: 'Czekaj dalej',
     watchdogClose: 'Zamknij dokument',
+    watchdogIgnore: 'Nie przypominaj ponownie',
     errFolderRootUnusable: 'Nie można odczytać wybranego folderu',
     menuFile: 'Plik',
     menuSectionNew: 'Nowy',
@@ -2723,12 +2933,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Zavřít karty vpravo',
     menuTabCloseAll: 'Zavřít všechny karty',
     menuTabReopen: 'Znovu otevřít zavřenou kartu',
+    menuTabPin: 'Připnout kartu (neuspávat)',
+    menuTabUnpin: 'Odepnout kartu',
     dlgAddFolderRoot: 'Přidat složku na domovskou stránku',
     watchdogTitle: 'Dokument spotřebovává příliš mnoho prostředků',
     watchdogBody:
       '„{title}“ už několik minut využívá hodně paměti nebo procesoru ({memory} MB, {cpu} % CPU). Můžete dál čekat, nebo dokument zavřít (u neuložených změn se nejdřív zeptáme na uložení). Diagnostika byla zaznamenána.',
     watchdogWait: 'Dál čekat',
     watchdogClose: 'Zavřít dokument',
+    watchdogIgnore: 'Znovu nepřipomínat',
     errFolderRootUnusable: 'Vybranou složku nelze načíst',
     menuFile: 'Soubor',
     menuSectionNew: 'Nový',
@@ -2850,12 +3063,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Tabbladen rechts sluiten',
     menuTabCloseAll: 'Alle tabbladen sluiten',
     menuTabReopen: 'Gesloten tabblad opnieuw openen',
+    menuTabPin: 'Tabblad vastmaken (geladen houden)',
+    menuTabUnpin: 'Tabblad losmaken',
     dlgAddFolderRoot: 'Map toevoegen aan startpagina',
     watchdogTitle: 'Document gebruikt te veel systeembronnen',
     watchdogBody:
       '"{title}" gebruikt al enkele minuten veel geheugen of CPU ({memory} MB, {cpu}% CPU). U kunt blijven wachten of het document sluiten (bij niet-opgeslagen wijzigingen wordt eerst gevraagd of u wilt opslaan). Diagnostische gegevens zijn vastgelegd.',
     watchdogWait: 'Blijven wachten',
     watchdogClose: 'Document sluiten',
+    watchdogIgnore: 'Niet opnieuw herinneren',
     errFolderRootUnusable: 'De geselecteerde map kan niet worden gelezen',
     menuFile: 'Bestand',
     menuSectionNew: 'Nieuw',
@@ -2979,12 +3195,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'Tutup tab di sebelah kanan',
     menuTabCloseAll: 'Tutup semua tab',
     menuTabReopen: 'Buka semula tab yang ditutup',
+    menuTabPin: 'Semat tab (kekal dimuat)',
+    menuTabUnpin: 'Nyahsemat tab',
     dlgAddFolderRoot: 'Tambah Folder ke Laman Utama',
     watchdogTitle: 'Dokumen menggunakan terlalu banyak sumber',
     watchdogBody:
       '"{title}" telah menggunakan banyak memori atau CPU selama beberapa minit ({memory} MB, CPU {cpu}%). Anda boleh terus menunggu atau menutup dokumen ini (perubahan yang belum disimpan akan ditanya dahulu). Diagnostik telah direkodkan.',
     watchdogWait: 'Terus Menunggu',
     watchdogClose: 'Tutup Dokumen',
+    watchdogIgnore: 'Jangan ingatkan lagi',
     errFolderRootUnusable: 'Folder yang dipilih tidak dapat dibaca',
     menuFile: 'Fail',
     menuSectionNew: 'Baharu',
@@ -3107,12 +3326,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'סגירת הכרטיסיות מימין',
     menuTabCloseAll: 'סגירת כל הכרטיסיות',
     menuTabReopen: 'פתיחה מחדש של הכרטיסייה שנסגרה',
+    menuTabPin: 'הצמד כרטיסייה (השאר טעונה)',
+    menuTabUnpin: 'בטל הצמדת כרטיסייה',
     dlgAddFolderRoot: 'הוספת תיקייה לדף הבית',
     watchdogTitle: 'המסמך צורך יותר מדי משאבים',
     watchdogBody:
       '"{title}" משתמש בהרבה זיכרון או מעבד כבר כמה דקות (זיכרון {memory} MB, מעבד {cpu}%). אפשר להמשיך לחכות או לסגור את המסמך (אם יש שינויים שלא נשמרו, תתבקשו לשמור קודם). נתוני האבחון נרשמו.',
     watchdogWait: 'להמשיך לחכות',
     watchdogClose: 'סגירת המסמך',
+    watchdogIgnore: 'לא להזכיר שוב',
     errFolderRootUnusable: 'לא ניתן לקרוא את התיקייה שנבחרה',
     menuFile: 'קובץ',
     menuSectionNew: 'חדש',
@@ -3232,12 +3454,15 @@ const tMain = createI18n({
     menuTabCloseRight: 'दाईं ओर के टैब बंद करें',
     menuTabCloseAll: 'सभी टैब बंद करें',
     menuTabReopen: 'बंद किया गया टैब फिर से खोलें',
+    menuTabPin: 'टैब पिन करें (लोड रखें)',
+    menuTabUnpin: 'टैब अनपिन करें',
     dlgAddFolderRoot: 'होम में फ़ोल्डर जोड़ें',
     watchdogTitle: 'दस्तावेज़ बहुत अधिक संसाधन ले रहा है',
     watchdogBody:
       '"{title}" कई मिनटों से बहुत अधिक मेमोरी या CPU इस्तेमाल कर रहा है (मेमोरी {memory} MB, CPU {cpu}%)। आप इंतज़ार जारी रख सकते हैं या यह दस्तावेज़ बंद कर सकते हैं (बिना सहेजे बदलाव होने पर पहले सहेजने के लिए पूछा जाएगा)। निदान जानकारी दर्ज कर ली गई है।',
     watchdogWait: 'इंतज़ार जारी रखें',
     watchdogClose: 'दस्तावेज़ बंद करें',
+    watchdogIgnore: 'दोबारा याद न दिलाएँ',
     errFolderRootUnusable: 'चयनित फ़ोल्डर पढ़ा नहीं जा सका',
     menuFile: 'फ़ाइल',
     menuSectionNew: 'नया',
@@ -3361,12 +3586,15 @@ const tMain = createI18n({
     menuTabCloseRight: '關閉右側分頁',
     menuTabCloseAll: '關閉所有分頁',
     menuTabReopen: '重新開啟已關閉的分頁',
+    menuTabPin: '釘選標籤頁（不休眠）',
+    menuTabUnpin: '取消釘選標籤頁',
     dlgAddFolderRoot: '將資料夾加入首頁',
     watchdogTitle: '文件佔用資源過高',
     watchdogBody:
       '「{title}」已持續數分鐘佔用大量記憶體或 CPU（記憶體 {memory} MB，CPU {cpu}%）。可以繼續等待，或關閉這個文件（有未儲存的變更會先詢問是否儲存）。診斷資訊已記錄。', // public-hygiene: allow
     watchdogWait: '繼續等待',
     watchdogClose: '關閉文件',
+    watchdogIgnore: '本次不再提醒',
     errFolderRootUnusable: '無法讀取所選資料夾',
     menuFile: '檔案',
     menuSectionNew: '新增',
@@ -3656,7 +3884,7 @@ function ensureFileIndexer(): FileIndexer | null {
 }
 
 const SEARCH_EXT_FAMILY: Record<string, readonly string[]> = {
-  docx: ['docx', 'doc', 'odt', 'ott'],
+  docx: ['docx', 'doc', 'dot', 'odt', 'ott', 'hwpx', 'hwp'],
   xlsx: ['xlsx', 'xlsm', 'xls', 'csv', 'tsv', 'ods', 'ots'],
   pptx: ['pptx', 'ppt', 'odp', 'otp'],
   md: ['md', 'markdown', 'txt', 'json'],
@@ -3871,6 +4099,13 @@ function createShellWindow(): void {
     minWidth: SHELL_WINDOW_MIN_WIDTH,
     minHeight: SHELL_WINDOW_MIN_HEIGHT,
     title: 'GenOffice',
+    // Paint the theme's surface before the renderer's first frame so the window
+    // does not flash white in dark mode. nativeTheme.themeSource is already set
+    // from the saved theme in app.whenReady, before this window is created.
+    // macOS uses vibrancy below, which must stay transparent.
+    ...(process.platform === 'darwin'
+      ? {}
+      : { backgroundColor: shellWindowBackground(nativeTheme.shouldUseDarkColors) }),
     // vibrancy: editor modules punch translucent regions (e.g. the slides
     // thumbnail pane) through to the desktop
     ...(process.platform === 'darwin'
@@ -3936,6 +4171,8 @@ function createShellWindow(): void {
   )
   tabManager = manager
   manager.setClosedListener((closed) => recentlyClosed.push(closed))
+  const stopSleepSweeper = manager.startSleepSweeper(tabSleepEnabled)
+  win.once('closed', stopSleepSweeper)
 
   // Docking: a detached window dragged over this window's tab strip hands its
   // document back. The strip reports the insertion slot for each preview
@@ -4102,6 +4339,16 @@ function createShellWindow(): void {
   win.on('closed', () => {
     if (shellWindow === win) shellWindow = null
     if (tabManager === manager) {
+      // the close guard has already settled every unsaved tab, so the tabs left are the session
+      if (restoreLastSessionEnabled(readAppSettings(APP_SETTINGS_PATH()))) {
+        try {
+          writeAppSettings(APP_SETTINGS_PATH(), {
+            [LAST_SESSION_DOCUMENTS_KEY]: [...new Set(manager.openFilePaths())],
+          })
+        } catch (err) {
+          console.warn('[shell] could not save the session documents:', err)
+        }
+      }
       tabManager = null
       setDockHost(null)
       publishAllOpenDocuments()
@@ -4118,13 +4365,15 @@ function createShellWindow(): void {
 // ---- routing: one dispatch function for every open path ----
 
 /**
- * Single source of truth for the open-dialog filter. Includes the
- * legacy .doc/.ppt binaries so they are selectable and surface the explicit
- * "not supported" dialog via openDocumentPath instead of being grayed out.
+ * Single source of truth for the open-dialog filter. Includes the still-legacy
+ * .ppt binary so it is selectable and surfaces the explicit "not supported"
+ * dialog via openDocumentPath instead of being grayed out; .doc/.dot route into
+ * the docs import filter.
  */
 const OPEN_DIALOG_EXTENSIONS = [
   'docx',
   'doc',
+  'dot',
   'xlsx',
   'xlsm',
   'xls',
@@ -4135,6 +4384,8 @@ const OPEN_DIALOG_EXTENSIONS = [
   'pptx',
   'ppt',
   'odt',
+  'hwpx',
+  'hwp',
   'odp',
   'otp',
   'pdf',
@@ -4680,6 +4931,32 @@ function registerHomeIpc(): void {
     )
   })
 
+  // Ask AI building files: the bundled CLI, confined to the conversation's
+  // work directory, the save folder and the starred files' folders (home-cli.ts)
+  const homeCliDeps: HomeCliDeps = {
+    runner: bundledCliRunner,
+    workRoot: () => join(app.getPath('userData'), 'ask-ai-work'),
+    outDir: defaultSaveDir,
+    sourcePaths: readStarredFiles,
+    recordRecent: recordRecentFile,
+  }
+  ipcMain.handle('kb:cli-context', (_event, sessionId: unknown): unknown =>
+    homeCliContext(homeCliDeps, typeof sessionId === 'string' ? sessionId : ''),
+  )
+  ipcMain.handle('kb:run-cli', async (_event, raw: unknown): Promise<unknown> => {
+    const req = (raw && typeof raw === 'object' ? raw : {}) as {
+      sessionId?: unknown
+      args?: unknown
+      files?: unknown
+      sources?: unknown
+    }
+    return runHomeCli(homeCliDeps, typeof req.sessionId === 'string' ? req.sessionId : '', {
+      args: Array.isArray(req.args) ? (req.args as string[]) : [],
+      files: Array.isArray(req.files) ? (req.files as { name: string; content: string }[]) : [],
+      sources: Array.isArray(req.sources) ? (req.sources as string[]) : [],
+    })
+  })
+
   ipcMain.handle(
     HOME_CHANNELS.rerankSearch,
     async (_event, raw: unknown): Promise<FileSearchRerank | null> => {
@@ -4769,7 +5046,7 @@ function registerHomeIpc(): void {
       title: tm('dlgOpenTitle'),
       filters: [
         { name: tm('filterSupported'), extensions: OPEN_DIALOG_EXTENSIONS },
-        { name: tm('filterWord'), extensions: ['docx', 'doc', 'odt', 'ott'] },
+        { name: tm('filterWord'), extensions: ['docx', 'doc', 'dot', 'odt', 'ott', 'hwpx', 'hwp'] },
         {
           name: tm('filterExcel'),
           extensions: ['xlsx', 'xlsm', 'xls', 'csv', 'tsv', 'ods', 'ots'],
@@ -4926,6 +5203,22 @@ function registerHomeIpc(): void {
     applyUpdateChannel(channel)
   })
 
+  ipcMain.handle(HOME_CHANNELS.getAutoUpdateCheck, () => autoUpdateCheckEnabled())
+
+  ipcMain.handle(HOME_CHANNELS.setAutoUpdateCheck, (_event, on: unknown) => {
+    if (typeof on !== 'boolean') return
+    writeAppSetting(APP_SETTINGS_PATH(), 'autoUpdateCheck', on)
+    cachedAutoUpdateCheck = on
+  })
+
+  ipcMain.handle(HOME_CHANNELS.getSilentInstallUpdate, () => silentInstallUpdateEnabled())
+
+  ipcMain.handle(HOME_CHANNELS.setSilentInstallUpdate, (_event, on: unknown) => {
+    if (typeof on !== 'boolean') return
+    writeAppSetting(APP_SETTINGS_PATH(), 'silentInstallUpdate', on)
+    cachedSilentInstallUpdate = on
+  })
+
   ipcMain.handle(
     HOME_CHANNELS.onboardingSeen,
     (): boolean => readAppSettings(APP_SETTINGS_PATH()).onboardingSeen === true,
@@ -4989,6 +5282,14 @@ function registerHomeIpc(): void {
     return authorNameSetting()
   })
 
+  ipcMain.handle(HOME_CHANNELS.getLegacyImportPrompt, (): boolean =>
+    readLegacyImportPrompt(APP_SETTINGS_PATH()),
+  )
+  ipcMain.handle(HOME_CHANNELS.setLegacyImportPrompt, (_event, prompt: unknown): boolean => {
+    writeLegacyImportPrompt(APP_SETTINGS_PATH(), prompt !== false)
+    return readLegacyImportPrompt(APP_SETTINGS_PATH())
+  })
+
   ipcMain.handle(HOME_CHANNELS.getAutoSaveDefault, (): AutoSaveDefault => currentAutoSaveDefault())
   ipcMain.handle('app:get-auto-save-default', (): AutoSaveDefault => currentAutoSaveDefault())
 
@@ -5002,6 +5303,25 @@ function registerHomeIpc(): void {
       autoSaveDefaultUpdatedAt: next.updatedAt,
     })
     for (const wc of webContents.getAllWebContents()) wc.send('app:auto-save-default-changed', next)
+  })
+
+  ipcMain.handle(HOME_CHANNELS.getTabSleepEnabled, () => tabSleepEnabled())
+  ipcMain.handle(HOME_CHANNELS.setTabSleepEnabled, (_event, on: unknown) => {
+    if (typeof on !== 'boolean') return
+    cachedTabSleepEnabled = on
+    writeAppSettings(APP_SETTINGS_PATH(), { tabSleepEnabled: on })
+  })
+
+  ipcMain.handle(HOME_CHANNELS.getRestoreLastSession, () =>
+    restoreLastSessionEnabled(readAppSettings(APP_SETTINGS_PATH())),
+  )
+  ipcMain.handle(HOME_CHANNELS.setRestoreLastSession, (_event, on: unknown) => {
+    if (typeof on !== 'boolean') return
+    // turning it off forgets the stored paths instead of keeping them around
+    writeAppSettings(APP_SETTINGS_PATH(), {
+      [RESTORE_LAST_SESSION_KEY]: on,
+      ...(on ? {} : { [LAST_SESSION_DOCUMENTS_KEY]: undefined }),
+    })
   })
 
   ipcMain.handle(HOME_CHANNELS.getMcpStatus, () => mcpStatus())
@@ -5523,6 +5843,7 @@ function tabMenuActions(): TabMenuActions {
     saveAs: (id) => documentAction(id, 'saveAs'),
     print: (id) => documentAction(id, 'print'),
     openInNewWindow: (id) => detachTabToWindow(id),
+    pin: (id, pinned) => tabManager?.setPinned(id, pinned),
     // two windows side by side, each on its own half of the screen the tab is on
     splitBeside: (id) => {
       if (!tabManager || !shellWindow) return
@@ -6624,7 +6945,7 @@ async function installMainProcessProxy(): Promise<void> {
   try {
     const { setGlobalDispatcher } = await import('undici')
     // loopback stays direct: a Custom provider on 127.0.0.1 must not ride
-    // the proxy as an absolute-form request (#2084)
+    // the proxy as an absolute-form request (genoffice#2084)
     setGlobalDispatcher(await createMainProcessProxyDispatcher(proxyUrl))
     // strip user:pass credentials before logging
     console.log('[proxy] main-process fetch via', proxyUrl.replace(/\/\/[^@/]*@/, '//***@'))
@@ -6676,7 +6997,7 @@ app.on('second-instance', (_event, argv, _cwd, additionalData) => {
 installNavigationGuard(app)
 installContextMenu(app, () => contextMenuLabels(currentLang()))
 registerAiIpc()
-ipcMain.handle('ai:open-model-settings', () => {
+const openHomeSettings = (section: 'aiModel' | 'skills'): void => {
   const win = shellWindow
   if (!win || win.isDestroyed()) return
   // the request may come from a detached window or while the shell is minimized
@@ -6684,8 +7005,13 @@ ipcMain.handle('ai:open-model-settings', () => {
   win.show()
   win.focus()
   tabManager?.openHomeTab()
-  win.webContents.send(HOME_CHANNELS.openSettings, { section: 'aiModel' })
-})
+  win.webContents.send(HOME_CHANNELS.openSettings, { section })
+}
+ipcMain.handle('ai:open-model-settings', () => openHomeSettings('aiModel'))
+ipcMain.handle('ai:open-skills-settings', () => openHomeSettings('skills'))
+// Model file naming. Registered here beside the other AI wiring so every
+// window type can reach it.
+registerAiNamingIpc(() => currentLang())
 registerProjectIpc()
 registerDocsIpc()
 registerHomeIpc()
@@ -6701,10 +7027,18 @@ registerIntegrationsIpc({
   cliPackageJson: app.isPackaged
     ? join(process.resourcesPath, 'cli', 'package.json')
     : join(APPS_ROOT, '..', 'packages', 'cli', 'package.json'),
+  recommendedSkillsDir: app.isPackaged
+    ? join(process.resourcesPath, 'cli', 'skills', 'recommended')
+    : join(APPS_ROOT, '..', 'skills', 'recommended'),
 })
 registerTabsIpc()
 registerDroppedFilesIpc()
-registerUserSkillsIpc({ cliRunner: makeUserCliRunner })
+registerUserSkillsIpc({
+  cliRunner: makeUserCliRunner,
+  folderRoots: folderRootPaths,
+  senderFile: (wcId) =>
+    tabManager?.describeWebContents(wcId)?.filePath ?? detachedFileForWebContents(wcId),
+})
 
 // sheets' project:resolveChat goes through the handler registered by docs-main; the sessionId reverse lookup hooks in here
 setSessionPathResolver(resolveSheetsSessionPath)
@@ -6951,7 +7285,12 @@ app.whenReady().then(async () => {
   setUpdateCheckInvoker(() => void checkForUpdatesNow())
   // every app's Settings entry (⌘, / Ctrl+,) lands on the shell's Settings view
   setSettingsInvoker(() => openSettingsView())
-  initAutoUpdater(() => shellWindow, currentUpdateChannel())
+  initAutoUpdater(
+    () => shellWindow,
+    currentUpdateChannel(),
+    autoUpdateCheckEnabled,
+    silentInstallUpdateEnabled,
+  )
   // resource watchdog: a renderer that stays hot for minutes gets diagnostics
   // recorded and the user an offer to close the document (headless exports
   // are short-lived and unattended)
@@ -6968,7 +7307,18 @@ app.whenReady().then(async () => {
     })
   }
 
-  openLaunchPaths(pendingLaunchPaths)
+  const launchSettings = readAppSettings(APP_SETTINGS_PATH())
+  const launchPaths = launchPathsWithLastSession(launchSettings, pendingLaunchPaths)
+  if (launchSettings[LAST_SESSION_DOCUMENTS_KEY] !== undefined) {
+    // consumed before opening: a document that crashes the app during restore
+    // must not be restored again at the next launch
+    try {
+      writeAppSettings(APP_SETTINGS_PATH(), { [LAST_SESSION_DOCUMENTS_KEY]: undefined })
+    } catch (err) {
+      console.warn('[shell] could not clear the session documents:', err)
+    }
+  }
+  openLaunchPaths(launchPaths)
   pendingLaunchPaths = []
   for (const recoverAs of pendingUnsavedNewRecoveries()) void newSheetTab(recoverAs)
 

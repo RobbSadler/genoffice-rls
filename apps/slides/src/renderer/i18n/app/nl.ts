@@ -194,6 +194,7 @@ export const nl = {
   appCtxSendToBack: 'Naar achtergrond',
   appCtxBringForward: 'Naar voren',
   appCtxSendBackward: 'Naar achteren',
+  appCtxRotate: 'Draaien',
   appCtxRotateLeft90: '90° naar links draaien',
   appCtxRotateRight90: '90° naar rechts draaien',
   appCtxFlipH: 'Horizontaal spiegelen',
@@ -233,6 +234,8 @@ export const nl = {
   appMasterFillNone: 'Geen opvulling',
   appMasterStroke: 'Contourkleur…',
   appMasterStrokeNone: 'Geen contour',
+  appMasterInsertTextBox: 'Tekstvak',
+  appMasterInsertShape: 'Vormen',
   appStartOpening: 'Openen…',
   appReadingSlideTitle:
     'Klik om naar de volgende dia te gaan (Esc om de leesweergave af te sluiten)',
